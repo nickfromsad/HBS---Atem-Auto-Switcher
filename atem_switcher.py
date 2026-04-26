@@ -1321,60 +1321,149 @@ class MainWindow(QMainWindow):
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 
+# Level meter bars — closed=dark, attack=mid-gray, open=white, releasing=light gray
 BAR_STYLE_CLOSED = """
-    QProgressBar { border: 1px solid #555; border-radius: 3px; background: #1e1e1e; }
-    QProgressBar::chunk { background: #2a6a2a; border-radius: 2px; }
+    QProgressBar { border: 1px solid #222; border-radius: 2px; background: #000; }
+    QProgressBar::chunk { background: #1e1e1e; border-radius: 1px; }
 """
 BAR_STYLE_ATTACK = """
-    QProgressBar { border: 1px solid #888; border-radius: 3px; background: #1e1e1e; }
-    QProgressBar::chunk { background: #3399ff; border-radius: 2px; }
+    QProgressBar { border: 1px solid #555; border-radius: 2px; background: #000; }
+    QProgressBar::chunk { background: #666; border-radius: 1px; }
 """
 BAR_STYLE_OPEN = """
-    QProgressBar { border: 1px solid #888; border-radius: 3px; background: #1e1e1e; }
-    QProgressBar::chunk { background: #ff5500; border-radius: 2px; }
+    QProgressBar { border: 1px solid #aaa; border-radius: 2px; background: #000; }
+    QProgressBar::chunk { background: #ffffff; border-radius: 1px; }
 """
 BAR_STYLE_RELEASING = """
-    QProgressBar { border: 1px solid #888; border-radius: 3px; background: #1e1e1e; }
-    QProgressBar::chunk { background: #ffaa00; border-radius: 2px; }
+    QProgressBar { border: 1px solid #444; border-radius: 2px; background: #000; }
+    QProgressBar::chunk { background: #3a3a3a; border-radius: 1px; }
 """
 THRESH_BAR_STYLE = """
-    QProgressBar { border: none; border-radius: 1px; background: #111; }
-    QProgressBar::chunk { background: #886600; border-radius: 1px; }
+    QProgressBar { border: none; background: #000; }
+    QProgressBar::chunk { background: #444; }
 """
 
-# Tally strip — left side of each row
-TALLY_ACTIVE   = "background: #ff3300; border-radius: 2px;"
-TALLY_INACTIVE = "background: #333333; border-radius: 2px;"
+# Tally — white when active
+TALLY_ACTIVE   = "background: #ffffff; border-radius: 2px;"
+TALLY_INACTIVE = "background: #1a1a1a; border-radius: 2px;"
 
-# Gate state label — right of level bar
-GATE_LBL_CLOSED    = "color: #555; background: transparent; font-size: 10px; font-weight: bold;"
-GATE_LBL_ATTACK    = "color: #3399ff; background: #0a1a30; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
-GATE_LBL_OPEN      = "color: #ff5500; background: #2a0a00; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
-GATE_LBL_RELEASING = "color: #ffaa00; background: #1a1000; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+# Gate state label
+GATE_LBL_CLOSED    = "color: #2a2a2a; background: transparent; font-size: 10px; font-weight: bold;"
+GATE_LBL_ATTACK    = "color: #aaa; background: #111; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+GATE_LBL_OPEN      = "color: #000; background: #fff; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+GATE_LBL_RELEASING = "color: #666; background: #111; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+
+# Automation button
 BTN_STYLE_OFF = """
-    QPushButton { background: #882200; color: white; border-radius: 8px; border: none; }
-    QPushButton:hover { background: #aa2200; }
+    QPushButton { background: #000; color: #fff; border: 1px solid #333; border-radius: 8px; }
+    QPushButton:hover { border-color: #666; }
 """
 BTN_STYLE_ON = """
-    QPushButton { background: #007733; color: white; border-radius: 8px; border: none; }
-    QPushButton:hover { background: #009944; }
+    QPushButton { background: #fff; color: #000; border: none; border-radius: 8px; }
+    QPushButton:hover { background: #ddd; }
+"""
+
+# Global app stylesheet — all controls use the B&W theme
+APP_STYLESHEET = """
+    QMainWindow, QWidget {
+        background: #0d0d0d;
+        color: #ffffff;
+    }
+    QGroupBox {
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        margin-top: 10px;
+        color: #555;
+        font-size: 11px;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 8px;
+        padding: 0 4px;
+    }
+    QPushButton {
+        background: #111;
+        color: #fff;
+        border: 1px solid #2a2a2a;
+        border-radius: 3px;
+        padding: 3px 8px;
+        min-height: 20px;
+    }
+    QPushButton:hover { border-color: #555; background: #1c1c1c; }
+    QPushButton:pressed { background: #000; }
+    QLineEdit, QSpinBox, QDoubleSpinBox {
+        background: #000;
+        color: #fff;
+        border: 1px solid #2a2a2a;
+        border-radius: 3px;
+        padding: 1px 4px;
+        selection-background-color: #fff;
+        selection-color: #000;
+    }
+    QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+        border-color: #555;
+    }
+    QSpinBox::up-button, QDoubleSpinBox::up-button,
+    QSpinBox::down-button, QDoubleSpinBox::down-button {
+        background: #111;
+        border: none;
+        width: 14px;
+    }
+    QComboBox {
+        background: #000;
+        color: #fff;
+        border: 1px solid #2a2a2a;
+        border-radius: 3px;
+        padding: 1px 6px;
+        min-height: 20px;
+    }
+    QComboBox:hover { border-color: #555; }
+    QComboBox::drop-down { border: none; width: 18px; }
+    QComboBox::down-arrow { width: 8px; height: 8px; }
+    QComboBox QAbstractItemView {
+        background: #111;
+        color: #fff;
+        border: 1px solid #333;
+        selection-background-color: #fff;
+        selection-color: #000;
+    }
+    QTabWidget::pane { border: 1px solid #2a2a2a; border-radius: 3px; }
+    QTabBar::tab {
+        background: #000;
+        color: #555;
+        border: 1px solid #2a2a2a;
+        border-bottom: none;
+        padding: 4px 14px;
+        margin-right: 2px;
+    }
+    QTabBar::tab:selected { color: #fff; border-color: #444; background: #111; }
+    QTabBar::tab:hover { color: #aaa; }
+    QLabel { color: #fff; }
+    QScrollBar:vertical {
+        background: #000; width: 8px; border: none;
+    }
+    QScrollBar::handle:vertical { background: #333; border-radius: 4px; }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
 
-# ── Dark palette ──────────────────────────────────────────────────────────────
+# ── Palette ───────────────────────────────────────────────────────────────────
 
 def dark_palette():
     p = QPalette()
     c = p.ColorRole
-    p.setColor(c.Window,          QColor(40, 40, 40))
-    p.setColor(c.WindowText,      QColor(220, 220, 220))
-    p.setColor(c.Base,            QColor(28, 28, 28))
-    p.setColor(c.AlternateBase,   QColor(48, 48, 48))
-    p.setColor(c.Text,            QColor(220, 220, 220))
-    p.setColor(c.Button,          QColor(55, 55, 55))
-    p.setColor(c.ButtonText,      QColor(220, 220, 220))
-    p.setColor(c.Highlight,       QColor(42, 130, 218))
-    p.setColor(c.HighlightedText, QColor(0, 0, 0))
+    p.setColor(c.Window,          QColor(13,  13,  13))
+    p.setColor(c.WindowText,      QColor(255, 255, 255))
+    p.setColor(c.Base,            QColor(0,   0,   0))
+    p.setColor(c.AlternateBase,   QColor(20,  20,  20))
+    p.setColor(c.Text,            QColor(255, 255, 255))
+    p.setColor(c.Button,          QColor(17,  17,  17))
+    p.setColor(c.ButtonText,      QColor(255, 255, 255))
+    p.setColor(c.Highlight,       QColor(255, 255, 255))
+    p.setColor(c.HighlightedText, QColor(0,   0,   0))
+    p.setColor(c.Mid,             QColor(30,  30,  30))
+    p.setColor(c.Dark,            QColor(10,  10,  10))
+    p.setColor(c.Shadow,          QColor(0,   0,   0))
     return p
 
 
@@ -1384,6 +1473,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setPalette(dark_palette())
+    app.setStyleSheet(APP_STYLESHEET)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
