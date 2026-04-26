@@ -624,7 +624,7 @@ class MainWindow(QMainWindow):
         header_row.setContentsMargins(16, 0, 16, 0)
         header_row.setSpacing(0)
 
-        hbs_lbl = QLabel("HBS")
+        hbs_lbl = QLabel("//HBS")
         hbs_lbl.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         hbs_lbl.setStyleSheet("color: #ffffff; letter-spacing: 3px;")
         header_row.addWidget(hbs_lbl)
