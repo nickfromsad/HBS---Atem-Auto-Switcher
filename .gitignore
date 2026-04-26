@@ -1,0 +1,7 @@
+atem_log.txt
+atem_settings.json
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+atemSocketChild.ts
