@@ -588,7 +588,7 @@ class AudioEngine:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ATEM Auto-Switcher")
+        self.setWindowTitle("HBS – ATEM Auto Switcher")
         self.setMinimumWidth(700)
 
         self.signals = Signals()
@@ -614,7 +614,48 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
         layout.setSpacing(10)
-        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setContentsMargins(0, 0, 0, 14)
+
+        # ── HBS brand header ──────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(52)
+        header.setStyleSheet("background: #000000;")
+        header_row = QHBoxLayout(header)
+        header_row.setContentsMargins(16, 0, 16, 0)
+        header_row.setSpacing(0)
+
+        hbs_lbl = QLabel("HBS")
+        hbs_lbl.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        hbs_lbl.setStyleSheet("color: #ffffff; letter-spacing: 3px;")
+        header_row.addWidget(hbs_lbl)
+
+        divider = QLabel()
+        divider.setFixedSize(1, 28)
+        divider.setStyleSheet("background: #444; margin: 0 12px;")
+        header_row.addSpacing(12)
+        header_row.addWidget(divider)
+        header_row.addSpacing(12)
+
+        title_lbl = QLabel("ATEM Auto Switcher")
+        title_lbl.setFont(QFont("Arial", 11))
+        title_lbl.setStyleSheet("color: #cccccc;")
+        header_row.addWidget(title_lbl)
+
+        header_row.addStretch()
+
+        url_lbl = QLabel("hofbroadcast.nl")
+        url_lbl.setStyleSheet("color: #555; font-size: 10px;")
+        header_row.addWidget(url_lbl)
+
+        layout.addWidget(header)
+
+        # add side margins for everything below the header
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(14, 8, 14, 0)
+        layout.addWidget(content)
+        layout = content_layout   # shadow outer layout so the rest of the method uses this
 
         # ── ATEM connection ───────────────────────────────────────────────────
         atem_box = QGroupBox("ATEM Connection")
