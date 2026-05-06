@@ -627,8 +627,8 @@ class CompanionServer:
         _PNG_OFF = _solid_png(200, 40,  40)   # red
 
         class _Handler(BaseHTTPRequestHandler):
-            def log_message(self, fmt, *args):  # silence default stderr logging
-                print(f"Companion ← {self.address_string()} {fmt % args}")
+            def log_message(self, fmt, *args):
+                pass  # suppress HTTP request logging
 
             def _json(self, code: int, data: dict):
                 body = json.dumps(data).encode()
