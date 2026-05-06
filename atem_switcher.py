@@ -23,11 +23,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ── Tee stdout to atem_log.txt ────────────────────────────────────────────────
 class _Tee:
     def __init__(self, *streams):
-        self._streams = streams
+        self._streams = list(streams)
+        self._gui_cb = None   # set to signals.log_line.emit after Qt starts
     def write(self, s):
         for f in self._streams:
             f.write(s)
             f.flush()
+        if self._gui_cb and s.strip():
+            try:
+                self._gui_cb(s)
+            except Exception:
+                pass
     def flush(self):
         for f in self._streams:
             f.flush()
@@ -47,7 +53,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QGroupBox, QProgressBar, QGridLayout, QSizePolicy,
-    QTabWidget,
+    QTabWidget, QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl
 from PyQt6.QtGui import QFont, QColor, QPalette, QDesktopServices
@@ -331,6 +337,7 @@ class Signals(QObject):
     atem_disconnected  = pyqtSignal()
     atem_connected     = pyqtSignal()
     automation_changed = pyqtSignal(bool)   # Companion HTTP triggered a toggle
+    log_line           = pyqtSignal(str)    # new log line for the GUI log tab
 
 
 # ── ATEM Controller ───────────────────────────────────────────────────────────
@@ -702,6 +709,8 @@ class MainWindow(QMainWindow):
         self.signals.atem_disconnected.connect(self._on_atem_disconnected)
         self.signals.atem_connected.connect(self._on_atem_connected)
         self.signals.automation_changed.connect(self._on_automation_changed)
+        self.signals.log_line.connect(self._on_log_line)
+        sys.stdout._gui_cb = self.signals.log_line.emit
 
         self._input_devices: list[tuple[int, str]] = []   # (device_idx, label)
         # Each entry: (row_widget, device_combo, ch_spin, inp_spin, bar)
@@ -1029,6 +1038,22 @@ class MainWindow(QMainWindow):
         misc_layout.addWidget(presets_box)
         misc_layout.addStretch()
         bottom_tabs.addTab(misc_tab, "Miscellaneous")
+
+        # ── Log tab ───────────────────────────────────────────────────────────
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_layout.setContentsMargins(4, 4, 4, 4)
+        self._log_view = QPlainTextEdit()
+        self._log_view.setReadOnly(True)
+        self._log_view.setMaximumBlockCount(1000)
+        self._log_view.setStyleSheet("""
+            QPlainTextEdit {
+                background: #111; color: #b0b0b0;
+                border: none; font-family: monospace; font-size: 11px;
+            }
+        """)
+        log_layout.addWidget(self._log_view)
+        bottom_tabs.addTab(log_tab, "Log")
 
         layout.addWidget(bottom_tabs)
 
@@ -1397,6 +1422,12 @@ class MainWindow(QMainWindow):
         """Slot — called when Companion HTTP request toggles automation."""
         self.auto_btn.setChecked(on)   # triggers _toggle_automation via toggled signal
 
+    def _on_log_line(self, text: str):
+        self._log_view.appendPlainText(text.rstrip())
+        self._log_view.verticalScrollBar().setValue(
+            self._log_view.verticalScrollBar().maximum()
+        )
+
     def _toggle_companion(self, checked: bool):
         if checked:
             port = self.companion_port_spin.value()
@@ -1581,13 +1612,19 @@ APP_STYLESHEET = """
     }
     QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {
-        background: #505050;
+        background: #888;
         border: none;
         width: 16px;
     }
     QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-        background: #686868;
+        background: #aaa;
+    }
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+        width: 7px; height: 7px;
+    }
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+        width: 7px; height: 7px;
     }
     QComboBox {
         background: #181818;
