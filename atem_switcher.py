@@ -49,8 +49,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QGroupBox, QProgressBar, QGridLayout, QSizePolicy,
     QTabWidget,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QColor, QPalette
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl
+from PyQt6.QtGui import QFont, QColor, QPalette, QDesktopServices
 
 
 # ── Minimal built-in ATEM UDP client ──────────────────────────────────────────
@@ -746,6 +746,22 @@ class MainWindow(QMainWindow):
         header_row.addWidget(title_lbl)
 
         header_row.addStretch()
+
+        help_btn = QPushButton("?")
+        help_btn.setFixedSize(22, 22)
+        help_btn.setToolTip("Open documentation")
+        help_btn.setStyleSheet("""
+            QPushButton {
+                background: #2a2a2a; color: #888; border: 1px solid #444;
+                border-radius: 11px; font-weight: bold; font-size: 12px; padding: 0;
+            }
+            QPushButton:hover { background: #3a3a3a; color: #ccc; border-color: #666; }
+        """)
+        help_btn.clicked.connect(lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/nickfromsad/HBS---Atem-Auto-Switcher#readme")
+        ))
+        header_row.addWidget(help_btn)
+        header_row.addSpacing(10)
 
         url_lbl = QLabel("hofbroadcast.nl")
         url_lbl.setStyleSheet("color: #555; font-size: 10px;")
@@ -1565,9 +1581,13 @@ APP_STYLESHEET = """
     }
     QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {
-        background: #2a2a2a;
+        background: #505050;
         border: none;
-        width: 14px;
+        width: 16px;
+    }
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+        background: #686868;
     }
     QComboBox {
         background: #181818;
