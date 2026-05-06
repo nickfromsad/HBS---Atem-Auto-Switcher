@@ -46,6 +46,12 @@ _log_file = open(_os.path.join(_APP_DIR, 'atem_log.txt'), 'w', encoding='utf-8')
 _log_file.write(f'=== ATEM log started {datetime.datetime.now()} ===\n')
 sys.stdout = _Tee(sys.__stdout__, _log_file)
 
+# Write arrow SVGs used by the stylesheet
+_ARROW_UP_SVG  = _os.path.join(_APP_DIR, 'arrow_up.svg')
+_ARROW_DN_SVG  = _os.path.join(_APP_DIR, 'arrow_dn.svg')
+open(_ARROW_UP_SVG, 'w').write('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><polygon points="4,1 7,7 1,7" fill="#d4d4d4"/></svg>')
+open(_ARROW_DN_SVG, 'w').write('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><polygon points="1,1 7,1 4,7" fill="#d4d4d4"/></svg>')
+
 import numpy as np
 import sounddevice as sd
 
@@ -1612,19 +1618,21 @@ APP_STYLESHEET = """
     }
     QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {
-        background: #888;
+        background: #2a2a2a;
         border: none;
         width: 16px;
     }
     QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
     QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
-        background: #aaa;
+        background: #3a3a3a;
     }
     QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-        width: 7px; height: 7px;
+        image: url(ARROW_UP_PATH);
+        width: 8px; height: 8px;
     }
     QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-        width: 7px; height: 7px;
+        image: url(ARROW_DN_PATH);
+        width: 8px; height: 8px;
     }
     QComboBox {
         background: #181818;
@@ -1690,7 +1698,11 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setPalette(dark_palette())
-    app.setStyleSheet(APP_STYLESHEET)
+    app.setStyleSheet(
+        APP_STYLESHEET
+        .replace('ARROW_UP_PATH', _ARROW_UP_SVG.replace('\\', '/'))
+        .replace('ARROW_DN_PATH', _ARROW_DN_SVG.replace('\\', '/'))
+    )
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
