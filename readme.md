@@ -16,7 +16,7 @@ Each audio channel has its own noise gate. The gate filters out background noise
 
 - **Per-channel gate** — independent threshold, attack, and release per microphone
 - **dBFS level meter** — real-time audio display from –60 dBFS to 0 dBFS with a gate threshold marker
-- **Tally indicator** — red strip highlights the currently active camera row
+- **Tally indicator** — strip highlights the currently active camera row
 - **Gate state display** — shows CLSD / ATCK / OPEN / REL per channel
 - **ATEM input names** — camera names pulled directly from the ATEM after connecting
 - **Multi M/E support** — choose which M/E bus the auto-switcher controls
@@ -25,6 +25,7 @@ Each audio channel has its own noise gate. The gate filters out background noise
 - **Silence delay** — how long all mics must be silent before cutting to the fallback camera
 - **Switching presets** — Fast / Medium / Slow presets with editable attack, release, and holdoff values
 - **Manual test switch** — send a switch command manually to verify the ATEM connection
+- **Stream Deck integration** — control automation on/off from Bitfocus Companion via HTTP
 - **Settings persistence** — all settings saved automatically on close and restored on next launch
 - **Auto-reconnect** — reconnects to the ATEM automatically if the connection drops
 
@@ -96,6 +97,28 @@ Signal level
 | Gate threshold | Signal level in dBFS the mic must exceed to open |
 | Attack | Seconds the signal must stay above threshold before the gate opens |
 | Release | Seconds the gate stays open after the signal drops below threshold |
+
+---
+
+## Stream Deck integration via Bitfocus Companion
+
+The switcher includes a built-in HTTP server that Bitfocus Companion can talk to directly, so you can turn auto-switching on and off from a Stream Deck button.
+
+In the **Settings** tab, set the port (default `8765`) and click **Enable**. The server starts immediately and the setting is remembered on next launch.
+
+### Setting up in Companion
+
+Add a new connection using the **Generic HTTP** module. Set the base URL to `http://127.0.0.1:8765` (or the IP of the PC if Companion runs on a different machine). Then on a button, add a **Send HTTP POST request** action and set the URI to one of the following:
+
+| URI | What it does |
+|---|---|
+| `/automation/toggle` | Flip automation on or off |
+| `/automation/on` | Turn automation on |
+| `/automation/off` | Turn automation off |
+
+For a toggle button that also shows whether automation is currently active, add a **Background Image** feedback to the same button. Set the URL to `http://127.0.0.1:8765/status/image` with a refresh interval of around 1000 ms. The button will show green when automation is on and red when it is off.
+
+The `/status` endpoint returns a JSON response (`{"automation_active": true/false}`) if you need to read the state from another system.
 
 ---
 

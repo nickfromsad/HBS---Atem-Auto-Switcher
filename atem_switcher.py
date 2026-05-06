@@ -15,7 +15,9 @@ import struct
 import datetime
 import json
 import os
+import zlib
 from collections import defaultdict
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 # ── Tee stdout to atem_log.txt ────────────────────────────────────────────────
@@ -328,6 +330,7 @@ class Signals(QObject):
     input_switched     = pyqtSignal(int)    # we triggered a switch
     atem_disconnected  = pyqtSignal()
     atem_connected     = pyqtSignal()
+    automation_changed = pyqtSignal(bool)   # Companion HTTP triggered a toggle
 
 
 # ── ATEM Controller ───────────────────────────────────────────────────────────
@@ -583,6 +586,105 @@ class AudioEngine:
                 self.signals.input_switched.emit(target)
 
 
+# ── Companion HTTP Server ─────────────────────────────────────────────────────
+
+class CompanionServer:
+    """
+    Tiny HTTP server so Bitfocus Companion (and Stream Deck) can toggle
+    auto-switching over the local network.
+
+    Endpoints
+    ---------
+    GET  /status              → {"automation_active": true/false}
+    POST /automation/on       → enable auto-switching
+    POST /automation/off      → disable auto-switching
+    POST /automation/toggle   → flip current state
+    """
+
+    def __init__(self, engine: 'AudioEngine', signals: 'Signals'):
+        self._engine  = engine
+        self._signals = signals
+        self._server: HTTPServer | None = None
+
+    def start(self, port: int) -> bool:
+        self.stop()
+        engine  = self._engine
+        signals = self._signals
+
+        def _solid_png(r: int, g: int, b: int, w: int = 72, h: int = 58) -> bytes:
+            """Generate a minimal solid-color PNG using only stdlib."""
+            def _chunk(tag: bytes, data: bytes) -> bytes:
+                crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+                return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', crc)
+            sig  = b'\x89PNG\r\n\x1a\n'
+            ihdr = _chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+            row  = b'\x00' + bytes([r, g, b]) * w   # filter=None + RGB pixels
+            idat = _chunk(b'IDAT', zlib.compress(row * h, 9))
+            iend = _chunk(b'IEND', b'')
+            return sig + ihdr + idat + iend
+
+        _PNG_ON  = _solid_png(0,   180, 80)   # green
+        _PNG_OFF = _solid_png(200, 40,  40)   # red
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):  # silence default stderr logging
+                print(f"Companion ← {self.address_string()} {fmt % args}")
+
+            def _json(self, code: int, data: dict):
+                body = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _png(self, data: bytes):
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/png')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path == '/status':
+                    self._json(200, {'automation_active': engine.automation_active})
+                elif self.path == '/status/image':
+                    self._png(_PNG_ON if engine.automation_active else _PNG_OFF)
+                else:
+                    self._json(404, {'error': 'not found'})
+
+            def do_POST(self):
+                if self.path == '/automation/on':
+                    new_state = True
+                elif self.path == '/automation/off':
+                    new_state = False
+                elif self.path == '/automation/toggle':
+                    new_state = not engine.automation_active
+                else:
+                    self._json(404, {'error': 'not found'})
+                    return
+                engine.automation_active = new_state
+                signals.automation_changed.emit(new_state)
+                self._json(200, {'automation_active': new_state})
+
+        try:
+            self._server = HTTPServer(('0.0.0.0', port), _Handler)
+            threading.Thread(target=self._server.serve_forever, daemon=True).start()
+            print(f"Companion HTTP server listening on port {port}")
+            return True
+        except Exception as e:
+            print(f"Companion HTTP server failed to start on port {port}: {e}")
+            self._server = None
+            return False
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+            self._server = None
+            print("Companion HTTP server stopped")
+
+
 # ── Main Window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -593,11 +695,13 @@ class MainWindow(QMainWindow):
 
         self.signals = Signals()
         self.engine = AudioEngine(self.signals)
+        self.companion = CompanionServer(self.engine, self.signals)
         self.signals.levels_updated.connect(self._on_levels)
         self.signals.gates_updated.connect(self._on_gates)
         self.signals.input_switched.connect(self._on_switched)
         self.signals.atem_disconnected.connect(self._on_atem_disconnected)
         self.signals.atem_connected.connect(self._on_atem_connected)
+        self.signals.automation_changed.connect(self._on_automation_changed)
 
         self._input_devices: list[tuple[int, str]] = []   # (device_idx, label)
         # Each entry: (row_widget, device_combo, ch_spin, inp_spin, bar)
@@ -619,14 +723,14 @@ class MainWindow(QMainWindow):
         # ── HBS brand header ──────────────────────────────────────────────────
         header = QWidget()
         header.setFixedHeight(52)
-        header.setStyleSheet("background: #000000;")
+        header.setStyleSheet("background: #141414;")
         header_row = QHBoxLayout(header)
         header_row.setContentsMargins(16, 0, 16, 0)
         header_row.setSpacing(0)
 
         hbs_lbl = QLabel("//HBS")
         hbs_lbl.setFont(QFont("Arial", 20, QFont.Weight.Bold))
-        hbs_lbl.setStyleSheet("color: #ffffff; letter-spacing: 3px;")
+        hbs_lbl.setStyleSheet("color: #d4d4d4; letter-spacing: 3px;")
         header_row.addWidget(hbs_lbl)
 
         divider = QLabel()
@@ -638,7 +742,7 @@ class MainWindow(QMainWindow):
 
         title_lbl = QLabel("ATEM Auto Switcher")
         title_lbl.setFont(QFont("Arial", 11))
-        title_lbl.setStyleSheet("color: #cccccc;")
+        title_lbl.setStyleSheet("color: #909090;")
         header_row.addWidget(title_lbl)
 
         header_row.addStretch()
@@ -796,6 +900,31 @@ class MainWindow(QMainWindow):
         cfg.addWidget(_desc("How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away."), 3, 2)
 
         cfg_outer.addLayout(cfg)
+
+        # ── Companion integration ──────────────────────────────────────────────
+        companion_box = QGroupBox("Companion / Stream Deck Integration")
+        companion_row = QHBoxLayout(companion_box)
+        companion_row.setSpacing(10)
+
+        self.companion_enable_btn = QPushButton("Enable")
+        self.companion_enable_btn.setCheckable(True)
+        self.companion_enable_btn.setFixedWidth(75)
+        self.companion_enable_btn.clicked.connect(self._toggle_companion)
+        companion_row.addWidget(self.companion_enable_btn)
+
+        companion_row.addWidget(QLabel("Port:"))
+        self.companion_port_spin = QSpinBox()
+        self.companion_port_spin.setRange(1024, 65535)
+        self.companion_port_spin.setValue(8765)
+        self.companion_port_spin.setFixedWidth(70)
+        companion_row.addWidget(self.companion_port_spin)
+
+        self.companion_status = QLabel("● Stopped")
+        self.companion_status.setStyleSheet("color: #ff4444; font-weight: bold;")
+        companion_row.addWidget(self.companion_status)
+        companion_row.addStretch()
+
+        cfg_outer.addWidget(companion_box)
         cfg_outer.addStretch()
         bottom_tabs.addTab(cfg_tab, "Settings")
 
@@ -915,6 +1044,10 @@ class MainWindow(QMainWindow):
                     self._preset_spins[i][0].setValue(a)
                     self._preset_spins[i][1].setValue(r)
                     self._preset_spins[i][2].setValue(h)
+            self.companion_port_spin.setValue(s.get('companion_port', 8765))
+            if s.get('companion_enabled', False):
+                self.companion_enable_btn.setChecked(True)
+                self._toggle_companion(True)
             print(f"Settings loaded from {_SETTINGS_FILE}")
         except FileNotFoundError:
             pass
@@ -944,13 +1077,15 @@ class MainWindow(QMainWindow):
                 'atem_input':  ins.currentData() or 1,
             })
         s = {
-            'atem_ip':       self.ip_edit.text().strip(),
-            'me':            self.me_spin.value(),
-            'silence_input': self.silence_combo.currentData() or DEFAULT_SILENCE_INPUT,
-            'holdoff':       self.holdoff_spin.value(),
-            'silence_delay': self.silence_delay_spin.value(),
-            'rows':          rows,
-            'presets':       [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
+            'atem_ip':           self.ip_edit.text().strip(),
+            'me':                self.me_spin.value(),
+            'silence_input':     self.silence_combo.currentData() or DEFAULT_SILENCE_INPUT,
+            'holdoff':           self.holdoff_spin.value(),
+            'silence_delay':     self.silence_delay_spin.value(),
+            'rows':              rows,
+            'presets':           [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
+            'companion_port':    self.companion_port_spin.value(),
+            'companion_enabled': self.companion_enable_btn.isChecked(),
         }
         try:
             with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -1242,6 +1377,30 @@ class MainWindow(QMainWindow):
             for row_w, *_ in self._mic_rows:
                 row_w._indicator.setStyleSheet(TALLY_INACTIVE)
 
+    def _on_automation_changed(self, on: bool):
+        """Slot — called when Companion HTTP request toggles automation."""
+        self.auto_btn.setChecked(on)   # triggers _toggle_automation via toggled signal
+
+    def _toggle_companion(self, checked: bool):
+        if checked:
+            port = self.companion_port_spin.value()
+            ok = self.companion.start(port)
+            if ok:
+                self.companion_enable_btn.setText("Disable")
+                self.companion_status.setText(f"● Running  :{port}")
+                self.companion_status.setStyleSheet("color: #00cc55; font-weight: bold;")
+                self.companion_port_spin.setEnabled(False)
+            else:
+                self.companion_enable_btn.setChecked(False)
+                self.companion_status.setText("● Failed — port in use?")
+                self.companion_status.setStyleSheet("color: #ff4444; font-weight: bold;")
+        else:
+            self.companion.stop()
+            self.companion_enable_btn.setText("Enable")
+            self.companion_status.setText("● Stopped")
+            self.companion_status.setStyleSheet("color: #ff4444; font-weight: bold;")
+            self.companion_port_spin.setEnabled(True)
+
     def _push_settings(self):
         e = self.engine
         e.mic_device_channels = [(dc.currentData(), cs.value()) for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
@@ -1314,6 +1473,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._save_settings()
+        self.companion.stop()
         self.engine.stop_audio()
         self.engine.atem.disconnect()
         event.accept()
@@ -1321,59 +1481,59 @@ class MainWindow(QMainWindow):
 
 # ── Styles ────────────────────────────────────────────────────────────────────
 
-# Level meter bars — closed=dark, attack=mid-gray, open=white, releasing=light gray
+# Level meter bars
 BAR_STYLE_CLOSED = """
-    QProgressBar { border: 1px solid #222; border-radius: 2px; background: #000; }
-    QProgressBar::chunk { background: #1e1e1e; border-radius: 1px; }
+    QProgressBar { border: 1px solid #383838; border-radius: 2px; background: #1e1e1e; }
+    QProgressBar::chunk { background: #2e2e2e; border-radius: 1px; }
 """
 BAR_STYLE_ATTACK = """
-    QProgressBar { border: 1px solid #555; border-radius: 2px; background: #000; }
-    QProgressBar::chunk { background: #666; border-radius: 1px; }
+    QProgressBar { border: 1px solid #505050; border-radius: 2px; background: #1e1e1e; }
+    QProgressBar::chunk { background: #787878; border-radius: 1px; }
 """
 BAR_STYLE_OPEN = """
-    QProgressBar { border: 1px solid #aaa; border-radius: 2px; background: #000; }
-    QProgressBar::chunk { background: #ffffff; border-radius: 1px; }
+    QProgressBar { border: 1px solid #606060; border-radius: 2px; background: #1e1e1e; }
+    QProgressBar::chunk { background: #b8b8b8; border-radius: 1px; }
 """
 BAR_STYLE_RELEASING = """
-    QProgressBar { border: 1px solid #444; border-radius: 2px; background: #000; }
-    QProgressBar::chunk { background: #3a3a3a; border-radius: 1px; }
+    QProgressBar { border: 1px solid #484848; border-radius: 2px; background: #1e1e1e; }
+    QProgressBar::chunk { background: #505050; border-radius: 1px; }
 """
 THRESH_BAR_STYLE = """
-    QProgressBar { border: none; background: #000; }
-    QProgressBar::chunk { background: #444; }
+    QProgressBar { border: none; background: #1e1e1e; }
+    QProgressBar::chunk { background: #555; }
 """
 
-# Tally — white when active
-TALLY_ACTIVE   = "background: #ffffff; border-radius: 2px;"
-TALLY_INACTIVE = "background: #1a1a1a; border-radius: 2px;"
+# Tally
+TALLY_ACTIVE   = "background: #c8c8c8; border-radius: 2px;"
+TALLY_INACTIVE = "background: #303030; border-radius: 2px;"
 
 # Gate state label
-GATE_LBL_CLOSED    = "color: #2a2a2a; background: transparent; font-size: 10px; font-weight: bold;"
-GATE_LBL_ATTACK    = "color: #aaa; background: #111; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
-GATE_LBL_OPEN      = "color: #000; background: #fff; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
-GATE_LBL_RELEASING = "color: #666; background: #111; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+GATE_LBL_CLOSED    = "color: #484848; background: transparent; font-size: 10px; font-weight: bold;"
+GATE_LBL_ATTACK    = "color: #aaa; background: #2e2e2e; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+GATE_LBL_OPEN      = "color: #1e1e1e; background: #c8c8c8; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+GATE_LBL_RELEASING = "color: #787878; background: #2a2a2a; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
 
 # Automation button
 BTN_STYLE_OFF = """
-    QPushButton { background: #000; color: #fff; border: 1px solid #333; border-radius: 8px; }
-    QPushButton:hover { border-color: #666; }
+    QPushButton { background: #252525; color: #c8c8c8; border: 1px solid #404040; border-radius: 8px; }
+    QPushButton:hover { border-color: #606060; background: #2e2e2e; }
 """
 BTN_STYLE_ON = """
-    QPushButton { background: #fff; color: #000; border: none; border-radius: 8px; }
-    QPushButton:hover { background: #ddd; }
+    QPushButton { background: #c8c8c8; color: #1e1e1e; border: none; border-radius: 8px; }
+    QPushButton:hover { background: #b0b0b0; }
 """
 
-# Global app stylesheet — all controls use the B&W theme
+# Global app stylesheet — soft dark gray theme
 APP_STYLESHEET = """
     QMainWindow, QWidget {
-        background: #0d0d0d;
-        color: #ffffff;
+        background: #1e1e1e;
+        color: #d4d4d4;
     }
     QGroupBox {
-        border: 1px solid #2a2a2a;
+        border: 1px solid #383838;
         border-radius: 4px;
         margin-top: 10px;
-        color: #555;
+        color: #686868;
         font-size: 11px;
     }
     QGroupBox::title {
@@ -1382,67 +1542,67 @@ APP_STYLESHEET = """
         padding: 0 4px;
     }
     QPushButton {
-        background: #111;
-        color: #fff;
-        border: 1px solid #2a2a2a;
+        background: #2a2a2a;
+        color: #d4d4d4;
+        border: 1px solid #404040;
         border-radius: 3px;
         padding: 3px 8px;
         min-height: 20px;
     }
-    QPushButton:hover { border-color: #555; background: #1c1c1c; }
-    QPushButton:pressed { background: #000; }
+    QPushButton:hover { border-color: #606060; background: #333; }
+    QPushButton:pressed { background: #1a1a1a; }
     QLineEdit, QSpinBox, QDoubleSpinBox {
-        background: #000;
-        color: #fff;
-        border: 1px solid #2a2a2a;
+        background: #181818;
+        color: #d4d4d4;
+        border: 1px solid #3a3a3a;
         border-radius: 3px;
         padding: 1px 4px;
-        selection-background-color: #fff;
-        selection-color: #000;
+        selection-background-color: #c8c8c8;
+        selection-color: #1e1e1e;
     }
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
-        border-color: #555;
+        border-color: #686868;
     }
     QSpinBox::up-button, QDoubleSpinBox::up-button,
     QSpinBox::down-button, QDoubleSpinBox::down-button {
-        background: #111;
+        background: #2a2a2a;
         border: none;
         width: 14px;
     }
     QComboBox {
-        background: #000;
-        color: #fff;
-        border: 1px solid #2a2a2a;
+        background: #181818;
+        color: #d4d4d4;
+        border: 1px solid #3a3a3a;
         border-radius: 3px;
         padding: 1px 6px;
         min-height: 20px;
     }
-    QComboBox:hover { border-color: #555; }
+    QComboBox:hover { border-color: #686868; }
     QComboBox::drop-down { border: none; width: 18px; }
     QComboBox::down-arrow { width: 8px; height: 8px; }
     QComboBox QAbstractItemView {
-        background: #111;
-        color: #fff;
-        border: 1px solid #333;
-        selection-background-color: #fff;
-        selection-color: #000;
+        background: #222;
+        color: #d4d4d4;
+        border: 1px solid #444;
+        selection-background-color: #c8c8c8;
+        selection-color: #1e1e1e;
     }
-    QTabWidget::pane { border: 1px solid #2a2a2a; border-radius: 3px; }
+    QTabWidget::pane { border: 1px solid #383838; border-radius: 3px; }
     QTabBar::tab {
-        background: #000;
-        color: #555;
-        border: 1px solid #2a2a2a;
+        background: #181818;
+        color: #686868;
+        border: 1px solid #383838;
         border-bottom: none;
         padding: 4px 14px;
         margin-right: 2px;
     }
-    QTabBar::tab:selected { color: #fff; border-color: #444; background: #111; }
+    QTabBar::tab:selected { color: #d4d4d4; border-color: #555; background: #242424; }
     QTabBar::tab:hover { color: #aaa; }
-    QLabel { color: #fff; }
+    QLabel { color: #d4d4d4; }
     QScrollBar:vertical {
-        background: #000; width: 8px; border: none;
+        background: #1e1e1e; width: 8px; border: none;
     }
-    QScrollBar::handle:vertical { background: #333; border-radius: 4px; }
+    QScrollBar::handle:vertical { background: #484848; border-radius: 4px; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
@@ -1452,18 +1612,18 @@ APP_STYLESHEET = """
 def dark_palette():
     p = QPalette()
     c = p.ColorRole
-    p.setColor(c.Window,          QColor(13,  13,  13))
-    p.setColor(c.WindowText,      QColor(255, 255, 255))
-    p.setColor(c.Base,            QColor(0,   0,   0))
-    p.setColor(c.AlternateBase,   QColor(20,  20,  20))
-    p.setColor(c.Text,            QColor(255, 255, 255))
-    p.setColor(c.Button,          QColor(17,  17,  17))
-    p.setColor(c.ButtonText,      QColor(255, 255, 255))
-    p.setColor(c.Highlight,       QColor(255, 255, 255))
-    p.setColor(c.HighlightedText, QColor(0,   0,   0))
-    p.setColor(c.Mid,             QColor(30,  30,  30))
-    p.setColor(c.Dark,            QColor(10,  10,  10))
-    p.setColor(c.Shadow,          QColor(0,   0,   0))
+    p.setColor(c.Window,          QColor(30,  30,  30))
+    p.setColor(c.WindowText,      QColor(212, 212, 212))
+    p.setColor(c.Base,            QColor(24,  24,  24))
+    p.setColor(c.AlternateBase,   QColor(34,  34,  34))
+    p.setColor(c.Text,            QColor(212, 212, 212))
+    p.setColor(c.Button,          QColor(42,  42,  42))
+    p.setColor(c.ButtonText,      QColor(212, 212, 212))
+    p.setColor(c.Highlight,       QColor(200, 200, 200))
+    p.setColor(c.HighlightedText, QColor(30,  30,  30))
+    p.setColor(c.Mid,             QColor(50,  50,  50))
+    p.setColor(c.Dark,            QColor(20,  20,  20))
+    p.setColor(c.Shadow,          QColor(10,  10,  10))
     return p
 
 
