@@ -418,6 +418,7 @@ class ATEMController:
             return False
 
     def disconnect(self):
+        self._ip = ""   # manual disconnect — stops the auto-reconnect loop
         self._silent_disconnect()
         self.atem = None
         self.connected = False
@@ -442,11 +443,17 @@ class ATEMController:
             threading.Thread(target=self._auto_reconnect, daemon=True).start()
 
     def _auto_reconnect(self):
-        time.sleep(3)
+        """Retry until connected, or until a manual disconnect clears _ip."""
         try:
-            self.connect(self._ip)
-        except Exception as e:
-            print(f"ATEM auto-reconnect failed: {e}")
+            attempt = 0
+            while self._ip and not self.connected:
+                time.sleep(3)
+                if not self._ip or self.connected:
+                    break   # manually disconnected or reconnected while waiting
+                attempt += 1
+                if self.connect(self._ip):
+                    break
+                print(f"ATEM auto-reconnect attempt {attempt} failed — retrying in 3s")
         finally:
             self._reconnecting = False
 
@@ -509,6 +516,10 @@ class AudioEngine:
         self.signals.preview_changed.emit(me_idx, src)
 
     def _on_atem_program(self, me_idx: int, src: int):
+        # Track the real program source so automation stays in sync with
+        # switches made elsewhere (PGM buttons, ATEM panel, other software)
+        if me_idx == self.me_index:
+            self._current_input = src
         self.signals.program_changed.emit(me_idx, src)
 
     def start_audio(self):
@@ -630,6 +641,8 @@ class AudioEngine:
             if open_channels:
                 self._silence_since = None
                 loudest = max(open_channels, key=lambda x: x[1])[0]
+                if loudest >= len(self.mic_atem_inputs):
+                    continue   # a row was removed mid-run — skip until state is consistent
                 target = self.mic_atem_inputs[loudest]
             elif any(s == 'releasing' for s in self._gate_states):
                 # Someone is in release — hold current camera, don't cut yet
