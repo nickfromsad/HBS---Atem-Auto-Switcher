@@ -506,6 +506,8 @@ class AudioEngine:
         self.silence_input  = DEFAULT_SILENCE_INPUT
         self.holdoff        = 0.8
         self.silence_delay  = 2.0
+        self.silence_loop_enabled  = False   # cycle cameras while everything is quiet
+        self.silence_loop_interval = 5.0     # seconds per camera in the loop
         self.me_index       = 0   # 0-based M/E index for auto-switching
 
         self._levels: list[float] = []
@@ -672,6 +674,19 @@ class AudioEngine:
                 if (now - self._silence_since) < self.silence_delay:
                     continue
                 target = self.silence_input
+                if self.silence_loop_enabled:
+                    # Cycle: no-audio camera → each row camera → back, advancing
+                    # every silence_loop_interval seconds while silence lasts
+                    loop_inputs = [self.silence_input]
+                    for inp in self.mic_atem_inputs:
+                        if inp not in loop_inputs:
+                            loop_inputs.append(inp)
+                    if self._current_input in loop_inputs:
+                        if (now - self._last_switch_time) >= self.silence_loop_interval:
+                            i = loop_inputs.index(self._current_input)
+                            target = loop_inputs[(i + 1) % len(loop_inputs)]
+                        else:
+                            target = self._current_input   # hold until interval elapses
 
             if target == self._current_input:
                 continue
@@ -1000,8 +1015,28 @@ class MainWindow(QMainWindow):
         idx = self.silence_combo.findData(DEFAULT_SILENCE_INPUT)
         if idx >= 0:
             self.silence_combo.setCurrentIndex(idx)
-        cfg.addWidget(self.silence_combo, 2, 1)
-        cfg.addWidget(_desc("Camera to cut to when all microphones are silent and the silence delay has expired. Typically a wide shot or presenter cam."), 3, 0, 1, 3)
+        sil_w = QWidget()
+        sil_row = QHBoxLayout(sil_w)
+        sil_row.setContentsMargins(0, 0, 0, 0)
+        sil_row.setSpacing(6)
+        sil_row.addWidget(self.silence_combo)
+        self.silence_loop_check = QCheckBox("Loop every")
+        self.silence_loop_check.setToolTip(
+            "While everything stays silent, keep cycling through all row cameras\n"
+            "instead of staying on the no-audio camera"
+        )
+        sil_row.addWidget(self.silence_loop_check)
+        self.silence_loop_spin = QDoubleSpinBox()
+        self.silence_loop_spin.setRange(1.0, 60.0)
+        self.silence_loop_spin.setValue(5.0)
+        self.silence_loop_spin.setSingleStep(1.0)
+        self.silence_loop_spin.setDecimals(0)
+        self.silence_loop_spin.setSuffix(" s")
+        self.silence_loop_spin.setFixedWidth(60)
+        sil_row.addWidget(self.silence_loop_spin)
+        sil_row.addStretch()
+        cfg.addWidget(sil_w, 2, 1)
+        cfg.addWidget(_desc("Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps cycling through this camera and all row cameras at the chosen interval until audio returns."), 3, 0, 1, 3)
 
         # Row 2 — Holdoff
         cfg.addWidget(QLabel("Switch holdoff (s):"), 4, 0)
@@ -1245,6 +1280,8 @@ class MainWindow(QMainWindow):
             self.me_spin.setValue(s.get('me', 1))
             self.holdoff_spin.setValue(s.get('holdoff', 0.8))
             self.silence_delay_spin.setValue(s.get('silence_delay', 2.0))
+            self.silence_loop_check.setChecked(s.get('silence_loop', False))
+            self.silence_loop_spin.setValue(s.get('silence_loop_interval', 5.0))
             sil = s.get('silence_input', DEFAULT_SILENCE_INPUT)
             idx = self.silence_combo.findData(sil)
             if idx >= 0:
@@ -1303,6 +1340,8 @@ class MainWindow(QMainWindow):
             'silence_input':     self.silence_combo.currentData() or DEFAULT_SILENCE_INPUT,
             'holdoff':           self.holdoff_spin.value(),
             'silence_delay':     self.silence_delay_spin.value(),
+            'silence_loop':          self.silence_loop_check.isChecked(),
+            'silence_loop_interval': self.silence_loop_spin.value(),
             'rows':              rows,
             'presets':           [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
             'companion_port':    self.companion_port_spin.value(),
@@ -1763,6 +1802,8 @@ class MainWindow(QMainWindow):
         e.silence_input    = self.silence_combo.currentData() or DEFAULT_SILENCE_INPUT
         e.holdoff          = self.holdoff_spin.value()
         e.silence_delay    = self.silence_delay_spin.value()
+        e.silence_loop_enabled  = self.silence_loop_check.isChecked()
+        e.silence_loop_interval = self.silence_loop_spin.value()
         e.me_index         = self.me_spin.value() - 1  # 0-based
 
     def _apply_preset(self, attack: float, release: float, holdoff: float):
