@@ -499,6 +499,7 @@ class AudioEngine:
         # mic_device_channels: list of (device_index, channel_within_device)
         self.mic_device_channels: list[tuple[int, int]] = []
         self.mic_atem_inputs:  list[int]   = []
+        self.mic_weights:      list[float] = []   # priority weight per row (1.0 = normal)
         self.gate_thresholds:  list[float] = []   # level to open gate
         self.gate_attacks:     list[float] = []   # attack time (s) per channel
         self.gate_releases:    list[float] = []   # release time (s) per channel
@@ -651,7 +652,13 @@ class AudioEngine:
 
             if open_channels:
                 self._silence_since = None
-                loudest = max(open_channels, key=lambda x: x[1])[0]
+                # Weighted loudness: priority weight biases which camera wins
+                # when several gates are open at the same time
+                def weighted(pair):
+                    i, lvl = pair
+                    w = self.mic_weights[i] if i < len(self.mic_weights) else 1.0
+                    return lvl * w
+                loudest = max(open_channels, key=weighted)[0]
                 if loudest >= len(self.mic_atem_inputs):
                     continue   # a row was removed mid-run — skip until state is consistent
                 target = self.mic_atem_inputs[loudest]
@@ -902,7 +909,7 @@ class MainWindow(QMainWindow):
         self._rows_grid.setVerticalSpacing(4)
         self._rows_grid.setContentsMargins(0, 0, 0, 0)
         # Col 0=tally  1=name  2=device(stretch)  3=ch  4=gate  5=atk  6=rel
-        # 7=camera(stretch)  8=level  9=state
+        # 7=camera(stretch)  8=prio  9=level  10=state
         self._rows_grid.setColumnStretch(2, 1)
         self._rows_grid.setColumnStretch(7, 1)
         self._rows_grid.setColumnMinimumWidth(0, 6)
@@ -911,11 +918,12 @@ class MainWindow(QMainWindow):
         self._rows_grid.setColumnMinimumWidth(4, 72)
         self._rows_grid.setColumnMinimumWidth(5, 52)
         self._rows_grid.setColumnMinimumWidth(6, 52)
-        self._rows_grid.setColumnMinimumWidth(8, 180)
-        self._rows_grid.setColumnMinimumWidth(9, 38)
+        self._rows_grid.setColumnMinimumWidth(8, 68)
+        self._rows_grid.setColumnMinimumWidth(9, 180)
+        self._rows_grid.setColumnMinimumWidth(10, 38)
 
         # Header row (grid row 0)
-        for col, text in enumerate(["", "Name", "Device", "Ch", "Gate", "Atk", "Rel", "Camera", "Level", "State"]):
+        for col, text in enumerate(["", "Name", "Device", "Ch", "Gate", "Atk", "Rel", "Camera", "Prio", "Level", "State"]):
             if not text:
                 continue
             lbl = QLabel(text)
@@ -1250,6 +1258,7 @@ class MainWindow(QMainWindow):
                 gate_db=r.get('gate_db', -34.0),
                 attack=r.get('attack', 0.05),
                 release=r.get('release', 0.5),
+                weight=r.get('weight', 1.0),
             )
 
     def _save_settings(self):
@@ -1263,6 +1272,7 @@ class MainWindow(QMainWindow):
                 'attack':      ats.value(),
                 'release':     rs.value(),
                 'atem_input':  ins.currentData() or 1,
+                'weight':      row_w._prio_combo.currentData() or 1.0,
             })
         s = {
             'atem_ip':           self.ip_edit.text().strip(),
@@ -1342,7 +1352,8 @@ class MainWindow(QMainWindow):
 
     def _add_mic_row(self, ch: int = 0, atem_input: int = None, name: str = None,
                      device_name: str = None, gate_db: float = -34.0,
-                     attack: float = 0.05, release: float = 0.5):
+                     attack: float = 0.05, release: float = 0.5,
+                     weight: float = 1.0):
         row_idx = len(self._mic_rows)
         if atem_input is None:
             atem_input = row_idx + 1
@@ -1431,7 +1442,22 @@ class MainWindow(QMainWindow):
             inp_combo.setCurrentIndex(found)
         self._rows_grid.addWidget(inp_combo, grid_row, 7)
 
-        # Col 8 — stacked level + threshold bars
+        # Col 8 — priority weight
+        prio_combo = QComboBox()
+        prio_combo.setFixedWidth(68)
+        prio_combo.setToolTip(
+            "Priority when several mics are open at the same time.\n"
+            "High: this camera wins unless another mic is much louder (2× boost).\n"
+            "Low: only switches here when clearly the loudest (0.5×)."
+        )
+        for plabel, w in (("Low", 0.5), ("Normal", 1.0), ("High", 2.0)):
+            prio_combo.addItem(plabel, w)
+        pidx = prio_combo.findData(weight)
+        prio_combo.setCurrentIndex(pidx if pidx >= 0 else 1)
+        row_w._prio_combo = prio_combo
+        self._rows_grid.addWidget(prio_combo, grid_row, 8)
+
+        # Col 9 — stacked level + threshold bars
         bars_w = QWidget()
         bars_w.setFixedWidth(180)
         bars_layout = QVBoxLayout(bars_w)
@@ -1459,15 +1485,15 @@ class MainWindow(QMainWindow):
         gate_spin.valueChanged.connect(
             lambda db, tb=thresh_bar: tb.setValue(max(0, min(100, int((db + 60) / 60 * 100))))
         )
-        self._rows_grid.addWidget(bars_w, grid_row, 8)
+        self._rows_grid.addWidget(bars_w, grid_row, 9)
 
-        # Col 9 — gate state label
+        # Col 10 — gate state label
         gate_lbl = QLabel("CLSD")
         gate_lbl.setFixedWidth(38)
         gate_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         gate_lbl.setStyleSheet(GATE_LBL_CLOSED)
         row_w._gate_lbl = gate_lbl
-        self._rows_grid.addWidget(gate_lbl, grid_row, 9)
+        self._rows_grid.addWidget(gate_lbl, grid_row, 10)
 
         self._mic_rows.append((row_w, name_edit, dev_combo, ch_spin, gate_spin, attack_spin, release_spin, inp_combo, bar))
 
@@ -1477,7 +1503,8 @@ class MainWindow(QMainWindow):
         row_w, name_edit, dev_combo, ch_spin, gate_spin, attack_spin, release_spin, inp_combo, bar = self._mic_rows.pop()
         grid_row = len(self._mic_rows) + 1
         for w in [row_w._indicator, name_edit, dev_combo, ch_spin, gate_spin,
-                  attack_spin, release_spin, inp_combo, row_w._bars_w, row_w._gate_lbl]:
+                  attack_spin, release_spin, inp_combo, row_w._prio_combo,
+                  row_w._bars_w, row_w._gate_lbl]:
             self._rows_grid.removeWidget(w)
             w.deleteLater()
 
@@ -1708,6 +1735,7 @@ class MainWindow(QMainWindow):
         e = self.engine
         e.mic_device_channels = [(dc.currentData(), cs.value()) for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.mic_atem_inputs  = [ins.currentData() or 1 for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
+        e.mic_weights      = [row_w._prio_combo.currentData() or 1.0 for row_w, *_ in self._mic_rows]
         e.gate_thresholds  = [10 ** (gs.value() / 20) for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.gate_attacks     = [ats.value() for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.gate_releases    = [rs.value()  for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
