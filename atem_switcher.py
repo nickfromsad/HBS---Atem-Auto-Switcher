@@ -508,8 +508,9 @@ class AudioEngine:
         self.silence_input  = DEFAULT_SILENCE_INPUT
         self.holdoff        = 0.8
         self.silence_delay  = 2.0
-        self.silence_loop_enabled  = False   # cycle cameras while everything is quiet
-        self.silence_loop_interval = 5.0     # seconds per camera in the loop
+        self.silence_loop_enabled = False    # cycle cameras while everything is quiet
+        self.silence_loop_min     = 5.0      # random hold time per camera is picked
+        self.silence_loop_max     = 8.0      # between these two bounds (seconds)
         self.extra_loop_inputs: list[int] = []   # loop cameras without a mic row
         self.me_index       = 0   # 0-based M/E index for auto-switching
 
@@ -522,6 +523,7 @@ class AudioEngine:
         self._current_input: int | None = None
         self._last_switch_time = 0.0
         self._silence_since: float | None = None
+        self._silence_loop_hold: float | None = None   # current random hold time
 
     def _on_atem_drop(self):
         self.signals.atem_disconnected.emit()
@@ -678,8 +680,9 @@ class AudioEngine:
                     continue
                 target = self.silence_input
                 if self.silence_loop_enabled:
-                    # Cycle: no-audio camera → each Loop-checked row camera → back,
-                    # advancing every silence_loop_interval seconds while silence lasts
+                    # Wander: while silence lasts, hold each camera for a random
+                    # time between loop min/max, then jump to a random *other*
+                    # camera — feels like a human operator instead of a pattern
                     loop_inputs = [self.silence_input]
                     for j, inp in enumerate(self.mic_atem_inputs):
                         if j < len(self.mic_loop_flags) and not self.mic_loop_flags[j]:
@@ -690,14 +693,16 @@ class AudioEngine:
                         if inp not in loop_inputs:
                             loop_inputs.append(inp)
                     if self._current_input in loop_inputs:
-                        if (now - self._last_switch_time) >= self.silence_loop_interval:
-                            i = loop_inputs.index(self._current_input)
-                            target = loop_inputs[(i + 1) % len(loop_inputs)]
+                        if self._silence_loop_hold is None:
+                            self._silence_loop_hold = random.uniform(
+                                self.silence_loop_min, self.silence_loop_max)
+                        if (now - self._last_switch_time) >= self._silence_loop_hold:
+                            others = [x for x in loop_inputs if x != self._current_input]
+                            target = random.choice(others) if others else self._current_input
                         else:
-                            target = self._current_input   # hold until interval elapses
+                            target = self._current_input   # hold until the time is up
                     else:
-                        # Entering the loop — start at a random camera so the
-                        # rotation doesn't always open with the same shot
+                        # Entering the loop — start at a random camera
                         target = random.choice(loop_inputs)
 
             if target == self._current_input:
@@ -708,6 +713,7 @@ class AudioEngine:
             if self.atem.switch_program(target, self.me_index):
                 self._current_input = target
                 self._last_switch_time = now
+                self._silence_loop_hold = None   # pick a fresh random hold time
                 self.signals.input_switched.emit(target)
 
 
@@ -1042,21 +1048,30 @@ class MainWindow(QMainWindow):
         sil_row.addWidget(self.silence_combo)
         self.silence_loop_check = QCheckBox("Loop every")
         self.silence_loop_check.setToolTip(
-            "While everything stays silent, keep cycling through all row cameras\n"
-            "instead of staying on the no-audio camera"
+            "While everything stays silent, keep jumping between the loop cameras\n"
+            "instead of staying on the no-audio camera. Each camera is held for a\n"
+            "random time between the two values."
         )
         sil_row.addWidget(self.silence_loop_check)
-        self.silence_loop_spin = QDoubleSpinBox()
-        self.silence_loop_spin.setRange(1.0, 60.0)
-        self.silence_loop_spin.setValue(5.0)
-        self.silence_loop_spin.setSingleStep(1.0)
-        self.silence_loop_spin.setDecimals(0)
-        self.silence_loop_spin.setSuffix(" s")
-        self.silence_loop_spin.setFixedWidth(60)
-        sil_row.addWidget(self.silence_loop_spin)
+
+        def _loop_spin(value):
+            sp = QDoubleSpinBox()
+            sp.setRange(1.0, 120.0)
+            sp.setValue(value)
+            sp.setSingleStep(1.0)
+            sp.setDecimals(0)
+            sp.setSuffix(" s")
+            sp.setFixedWidth(60)
+            return sp
+
+        self.silence_loop_min_spin = _loop_spin(5.0)
+        sil_row.addWidget(self.silence_loop_min_spin)
+        sil_row.addWidget(QLabel("–"))
+        self.silence_loop_max_spin = _loop_spin(8.0)
+        sil_row.addWidget(self.silence_loop_max_spin)
         sil_row.addStretch()
         _setting("No-audio camera:", sil_w,
-                 "Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps cycling through this camera and every row with its Loop box ticked, at the chosen interval, until audio returns. The loop starts at a random camera each time.")
+                 "Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps jumping to a random loop camera, holding each one for a random time between the two values, until audio returns.")
 
         # Extra loop cameras (no mic row)
         extra_w = QWidget()
@@ -1317,7 +1332,10 @@ class MainWindow(QMainWindow):
             self.holdoff_spin.setValue(s.get('holdoff', 0.8))
             self.silence_delay_spin.setValue(s.get('silence_delay', 2.0))
             self.silence_loop_check.setChecked(s.get('silence_loop', False))
-            self.silence_loop_spin.setValue(s.get('silence_loop_interval', 5.0))
+            # fall back to the old single-interval key from earlier versions
+            old_iv = s.get('silence_loop_interval', 5.0)
+            self.silence_loop_min_spin.setValue(s.get('silence_loop_min', old_iv))
+            self.silence_loop_max_spin.setValue(s.get('silence_loop_max', max(old_iv, 8.0)))
             self.extra_loop_inputs = [int(x) for x in s.get('extra_loop_inputs', [])]
             self._rebuild_extra_chips()
             sil = s.get('silence_input', DEFAULT_SILENCE_INPUT)
@@ -1381,7 +1399,8 @@ class MainWindow(QMainWindow):
             'holdoff':           self.holdoff_spin.value(),
             'silence_delay':     self.silence_delay_spin.value(),
             'silence_loop':          self.silence_loop_check.isChecked(),
-            'silence_loop_interval': self.silence_loop_spin.value(),
+            'silence_loop_min':      self.silence_loop_min_spin.value(),
+            'silence_loop_max':      self.silence_loop_max_spin.value(),
             'extra_loop_inputs':     self.extra_loop_inputs,
             'rows':              rows,
             'presets':           [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
@@ -1886,7 +1905,9 @@ class MainWindow(QMainWindow):
         e.holdoff          = self.holdoff_spin.value()
         e.silence_delay    = self.silence_delay_spin.value()
         e.silence_loop_enabled  = self.silence_loop_check.isChecked()
-        e.silence_loop_interval = self.silence_loop_spin.value()
+        e.silence_loop_min      = self.silence_loop_min_spin.value()
+        e.silence_loop_max      = max(self.silence_loop_min_spin.value(),
+                                      self.silence_loop_max_spin.value())
         e.extra_loop_inputs     = list(self.extra_loop_inputs)
         e.me_index         = self.me_spin.value() - 1  # 0-based
 
