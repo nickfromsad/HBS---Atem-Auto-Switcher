@@ -365,6 +365,8 @@ class ATEMConnection:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+APP_VERSION = "1.25"   # bump on every release (matches the GitHub commit count)
+
 AUDIO_SAMPLERATE    = 48000
 AUDIO_BLOCKSIZE     = 1024
 DEFAULT_SILENCE_INPUT = 4   # No audio → Camera 4
@@ -501,7 +503,6 @@ class AudioEngine:
         self.mic_device_channels: list[tuple[int, int]] = []
         self.mic_atem_inputs:  list[int]   = []
         self.mic_weights:      list[float] = []   # priority weight per row (1.0 = normal)
-        self.mic_loop_flags:   list[bool]  = []   # include row camera in the silence loop
         self.gate_thresholds:  list[float] = []   # level to open gate
         self.gate_attacks:     list[float] = []   # attack time (s) per channel
         self.gate_releases:    list[float] = []   # release time (s) per channel
@@ -684,11 +685,6 @@ class AudioEngine:
                     # time between loop min/max, then jump to a random *other*
                     # camera — feels like a human operator instead of a pattern
                     loop_inputs = [self.silence_input]
-                    for j, inp in enumerate(self.mic_atem_inputs):
-                        if j < len(self.mic_loop_flags) and not self.mic_loop_flags[j]:
-                            continue
-                        if inp not in loop_inputs:
-                            loop_inputs.append(inp)
                     for inp in self.extra_loop_inputs:
                         if inp not in loop_inputs:
                             loop_inputs.append(inp)
@@ -885,6 +881,10 @@ class MainWindow(QMainWindow):
         title_lbl.setStyleSheet("color: #909090;")
         header_row.addWidget(title_lbl)
 
+        version_lbl = QLabel(f"v{APP_VERSION}")
+        version_lbl.setStyleSheet("color: #555; font-size: 10px; margin-left: 8px;")
+        header_row.addWidget(version_lbl)
+
         header_row.addStretch()
 
         help_btn = QPushButton("?")
@@ -944,7 +944,7 @@ class MainWindow(QMainWindow):
         self._rows_grid.setVerticalSpacing(4)
         self._rows_grid.setContentsMargins(0, 0, 0, 0)
         # Col 0=tally  1=name  2=device(stretch)  3=ch  4=gate  5=atk  6=rel
-        # 7=camera(stretch)  8=prio  9=loop  10=level  11=state
+        # 7=camera(stretch)  8=prio  9=level  10=state
         self._rows_grid.setColumnStretch(2, 1)
         self._rows_grid.setColumnStretch(7, 1)
         self._rows_grid.setColumnMinimumWidth(0, 6)
@@ -954,12 +954,11 @@ class MainWindow(QMainWindow):
         self._rows_grid.setColumnMinimumWidth(5, 52)
         self._rows_grid.setColumnMinimumWidth(6, 52)
         self._rows_grid.setColumnMinimumWidth(8, 68)
-        self._rows_grid.setColumnMinimumWidth(9, 36)
-        self._rows_grid.setColumnMinimumWidth(10, 180)
-        self._rows_grid.setColumnMinimumWidth(11, 38)
+        self._rows_grid.setColumnMinimumWidth(9, 180)
+        self._rows_grid.setColumnMinimumWidth(10, 38)
 
         # Header row (grid row 0)
-        for col, text in enumerate(["", "Name", "Device", "Ch", "Gate", "Atk", "Rel", "Camera", "Prio", "Loop", "Level", "State"]):
+        for col, text in enumerate(["", "Name", "Device", "Ch", "Gate", "Atk", "Rel", "Camera", "Prio", "Level", "State"]):
             if not text:
                 continue
             lbl = QLabel(text)
@@ -1071,7 +1070,7 @@ class MainWindow(QMainWindow):
         sil_row.addWidget(self.silence_loop_max_spin)
         sil_row.addStretch()
         _setting("No-audio camera:", sil_w,
-                 "Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps jumping to a random loop camera, holding each one for a random time between the two values, until audio returns.")
+                 "Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher keeps jumping between this camera and the Extra loop cameras below, holding each for a random time between the two values, until audio returns.")
 
         # Extra loop cameras (no mic row)
         extra_w = QWidget()
@@ -1090,7 +1089,7 @@ class MainWindow(QMainWindow):
         self._extra_chips_row = extra_row
         extra_row.addStretch()
         _setting("Extra loop cameras:", extra_w,
-                 "Cameras without a microphone row (e.g. wide or beauty shots) to include in the silence loop. Click an added camera to remove it again.")
+                 "The cameras the silence loop cycles through, together with the no-audio camera. Add wide or beauty shots here — any camera works, with or without a microphone row. Click an added camera to remove it again.")
 
         # Holdoff
         self.holdoff_spin = QDoubleSpinBox()
@@ -1375,7 +1374,6 @@ class MainWindow(QMainWindow):
                 attack=r.get('attack', 0.05),
                 release=r.get('release', 0.5),
                 weight=r.get('weight', 1.0),
-                in_loop=r.get('in_loop', True),
             )
 
     def _save_settings(self):
@@ -1390,7 +1388,6 @@ class MainWindow(QMainWindow):
                 'release':     rs.value(),
                 'atem_input':  ins.currentData() or 1,
                 'weight':      row_w._prio_combo.currentData() or 1.0,
-                'in_loop':     row_w._loop_check.isChecked(),
             })
         s = {
             'atem_ip':           self.ip_edit.text().strip(),
@@ -1475,7 +1472,7 @@ class MainWindow(QMainWindow):
     def _add_mic_row(self, ch: int = 0, atem_input: int = None, name: str = None,
                      device_name: str = None, gate_db: float = -34.0,
                      attack: float = 0.05, release: float = 0.5,
-                     weight: float = 1.0, in_loop: bool = True):
+                     weight: float = 1.0):
         row_idx = len(self._mic_rows)
         if atem_input is None:
             atem_input = row_idx + 1
@@ -1579,14 +1576,7 @@ class MainWindow(QMainWindow):
         row_w._prio_combo = prio_combo
         self._rows_grid.addWidget(prio_combo, grid_row, 8)
 
-        # Col 9 — include camera in the silence loop
-        loop_check = QCheckBox()
-        loop_check.setChecked(in_loop)
-        loop_check.setToolTip("Include this camera when looping during silence")
-        row_w._loop_check = loop_check
-        self._rows_grid.addWidget(loop_check, grid_row, 9, Qt.AlignmentFlag.AlignCenter)
-
-        # Col 10 — stacked level + threshold bars
+        # Col 9 — stacked level + threshold bars
         bars_w = QWidget()
         bars_w.setFixedWidth(180)
         bars_layout = QVBoxLayout(bars_w)
@@ -1614,15 +1604,15 @@ class MainWindow(QMainWindow):
         gate_spin.valueChanged.connect(
             lambda db, tb=thresh_bar: tb.setValue(max(0, min(100, int((db + 60) / 60 * 100))))
         )
-        self._rows_grid.addWidget(bars_w, grid_row, 10)
+        self._rows_grid.addWidget(bars_w, grid_row, 9)
 
-        # Col 11 — gate state label
+        # Col 10 — gate state label
         gate_lbl = QLabel("CLSD")
         gate_lbl.setFixedWidth(38)
         gate_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         gate_lbl.setStyleSheet(GATE_LBL_CLOSED)
         row_w._gate_lbl = gate_lbl
-        self._rows_grid.addWidget(gate_lbl, grid_row, 11)
+        self._rows_grid.addWidget(gate_lbl, grid_row, 10)
 
         self._mic_rows.append((row_w, name_edit, dev_combo, ch_spin, gate_spin, attack_spin, release_spin, inp_combo, bar))
 
@@ -1633,7 +1623,7 @@ class MainWindow(QMainWindow):
         grid_row = len(self._mic_rows) + 1
         for w in [row_w._indicator, name_edit, dev_combo, ch_spin, gate_spin,
                   attack_spin, release_spin, inp_combo, row_w._prio_combo,
-                  row_w._loop_check, row_w._bars_w, row_w._gate_lbl]:
+                  row_w._bars_w, row_w._gate_lbl]:
             self._rows_grid.removeWidget(w)
             w.deleteLater()
 
@@ -1897,7 +1887,6 @@ class MainWindow(QMainWindow):
         e.mic_device_channels = [(dc.currentData(), cs.value()) for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.mic_atem_inputs  = [ins.currentData() or 1 for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.mic_weights      = [row_w._prio_combo.currentData() or 1.0 for row_w, *_ in self._mic_rows]
-        e.mic_loop_flags   = [row_w._loop_check.isChecked() for row_w, *_ in self._mic_rows]
         e.gate_thresholds  = [10 ** (gs.value() / 20) for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.gate_attacks     = [ats.value() for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
         e.gate_releases    = [rs.value()  for _, ne, dc, cs, gs, ats, rs, ins, _ in self._mic_rows]
