@@ -42,7 +42,14 @@ import os as _os
 _APP_DIR = _os.path.join(_os.path.expanduser('~'), 'Desktop', 'atem-switcher')
 _os.makedirs(_APP_DIR, exist_ok=True)
 _SETTINGS_FILE = _os.path.join(_APP_DIR, 'atem_settings.json')
-_log_file = open(_os.path.join(_APP_DIR, 'atem_log.txt'), 'w', encoding='utf-8')
+_LOG_PATH = _os.path.join(_APP_DIR, 'atem_log.txt')
+# Keep the previous session's log (e.g. after a crash) as atem_log.prev.txt
+try:
+    if _os.path.exists(_LOG_PATH):
+        _os.replace(_LOG_PATH, _os.path.join(_APP_DIR, 'atem_log.prev.txt'))
+except OSError:
+    pass
+_log_file = open(_LOG_PATH, 'w', encoding='utf-8')
 _log_file.write(f'=== ATEM log started {datetime.datetime.now()} ===\n')
 sys.stdout = _Tee(sys.__stdout__, _log_file)
 
@@ -95,6 +102,7 @@ class ATEMConnection:
         self.inputs: dict[int, dict] = {}   # inputId → {name, short_name}
         self.preview: dict[int, int] = {}   # me_idx → current preview source
         self.program: dict[int, int] = {}   # me_idx → current program source
+        self.init_complete = False          # True once InCm parsed from the dump
         # Called (from keepalive thread) when connection drops — set by ATEMController
         self.on_disconnect = None
         # Called with (me_idx, source) whenever the preview/program bus changes
@@ -161,7 +169,7 @@ class ATEMConnection:
                     continue   # duplicate or out-of-order — wait for retransmit
                 # Parse commands from this packet to learn model/topology
                 self._parse_state_packet(data)
-                if b'InCm' in data:
+                if self.init_complete:
                     incm_received = True
                     print(f"  ✓ InCm received at packet {n} — ATEM ready for commands")
                     break
@@ -326,6 +334,8 @@ class ATEMConnection:
                     cb = self.on_program
                     if cb:
                         cb(me_idx, src)
+            elif name == b'InCm':
+                self.init_complete = True
             elif name == b'PrvI' and len(payload) >= 4:
                 me_idx = payload[0]
                 src    = struct.unpack('!H', payload[2:4])[0]
@@ -376,6 +386,7 @@ class Signals(QObject):
     input_switched     = pyqtSignal(int)    # we triggered a switch
     atem_disconnected  = pyqtSignal()
     atem_connected     = pyqtSignal()
+    atem_connect_finished = pyqtSignal(bool)   # manual connect attempt done (ok?)
     automation_changed = pyqtSignal(bool)   # Companion HTTP triggered a toggle
     preview_changed    = pyqtSignal(int, int)  # (me_idx, source) — ATEM preview bus changed
     program_changed    = pyqtSignal(int, int)  # (me_idx, source) — ATEM program bus changed
@@ -781,6 +792,7 @@ class MainWindow(QMainWindow):
         self.signals.input_switched.connect(self._on_switched)
         self.signals.atem_disconnected.connect(self._on_atem_disconnected)
         self.signals.atem_connected.connect(self._on_atem_connected)
+        self.signals.atem_connect_finished.connect(self._on_connect_finished)
         self.signals.automation_changed.connect(self._on_automation_changed)
         self.signals.preview_changed.connect(self._on_preview_changed)
         self.signals.program_changed.connect(self._on_program_changed)
@@ -964,6 +976,7 @@ class MainWindow(QMainWindow):
         self.me_spin.setRange(1, 4)
         self.me_spin.setValue(1)
         self.me_spin.setFixedWidth(55)
+        self.me_spin.valueChanged.connect(lambda _v: self._refresh_bus_highlights())
         cfg.addWidget(self.me_spin, 0, 1)
         cfg.addWidget(_desc("Which M/E bus the switcher controls. M/E 1 is the main program output. Most setups only have one M/E."), 0, 2)
 
@@ -1522,14 +1535,20 @@ class MainWindow(QMainWindow):
                 buttons[inp_id] = btn
 
         # Restore highlights from the last known bus state
-        if atem:
-            me = self.me_spin.value() - 1
-            src = atem.program.get(me)
-            if src is not None:
-                self._apply_program(src)
-            src = atem.preview.get(me)
-            if src is not None:
-                self._apply_preview(src)
+        self._refresh_bus_highlights()
+
+    def _refresh_bus_highlights(self):
+        """Re-apply PGM/PVW highlights from the ATEM state for the current M/E."""
+        atem = self.engine.atem.atem
+        if not atem:
+            return
+        me = self.me_spin.value() - 1
+        src = atem.program.get(me)
+        if src is not None:
+            self._apply_program(src)
+        src = atem.preview.get(me)
+        if src is not None:
+            self._apply_preview(src)
 
     def _pgm_clicked(self, inp: int):
         me = self.me_spin.value() - 1
@@ -1568,15 +1587,25 @@ class MainWindow(QMainWindow):
             self.engine.atem.disconnect()
             self._show_disconnected()
         else:
+            # Connect in a worker thread — the state dump can take seconds and
+            # would freeze the GUI if run on the main thread.
             ip = self.ip_edit.text().strip()
+            self.connect_btn.setEnabled(False)
             self.atem_status.setText("● Connecting…")
             self.atem_status.setStyleSheet("color: orange; font-weight: bold;")
-            QApplication.processEvents()
-            ok = self.engine.atem.connect(ip)
-            if not ok:
-                self.atem_status.setText("● Failed — check IP")
-                self.atem_status.setStyleSheet("color: #ff4444; font-weight: bold;")
-            # on success, _on_atem_connected is called via signal
+            threading.Thread(
+                target=lambda: self.signals.atem_connect_finished.emit(
+                    self.engine.atem.connect(ip)),
+                daemon=True,
+            ).start()
+
+    def _on_connect_finished(self, ok: bool):
+        """Slot — manual connect attempt finished (worker thread done)."""
+        self.connect_btn.setEnabled(True)
+        if not ok:
+            self.atem_status.setText("● Failed — check IP")
+            self.atem_status.setStyleSheet("color: #ff4444; font-weight: bold;")
+        # on success, _on_atem_connected handles the UI via the connected signal
 
     def _show_disconnected(self):
         self.connect_btn.setText("Connect")
