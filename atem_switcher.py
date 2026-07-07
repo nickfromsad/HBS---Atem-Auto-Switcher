@@ -9,6 +9,7 @@ Each row picks its own audio device (DVS stereo pair) and channel (0=left, 1=rig
 import sys
 import time
 import math
+import random
 import threading
 import socket
 import struct
@@ -509,6 +510,7 @@ class AudioEngine:
         self.silence_delay  = 2.0
         self.silence_loop_enabled  = False   # cycle cameras while everything is quiet
         self.silence_loop_interval = 5.0     # seconds per camera in the loop
+        self.extra_loop_inputs: list[int] = []   # loop cameras without a mic row
         self.me_index       = 0   # 0-based M/E index for auto-switching
 
         self._levels: list[float] = []
@@ -684,12 +686,19 @@ class AudioEngine:
                             continue
                         if inp not in loop_inputs:
                             loop_inputs.append(inp)
+                    for inp in self.extra_loop_inputs:
+                        if inp not in loop_inputs:
+                            loop_inputs.append(inp)
                     if self._current_input in loop_inputs:
                         if (now - self._last_switch_time) >= self.silence_loop_interval:
                             i = loop_inputs.index(self._current_input)
                             target = loop_inputs[(i + 1) % len(loop_inputs)]
                         else:
                             target = self._current_input   # hold until interval elapses
+                    else:
+                        # Entering the loop — start at a random camera so the
+                        # rotation doesn't always open with the same shot
+                        target = random.choice(loop_inputs)
 
             if target == self._current_input:
                 continue
@@ -829,6 +838,8 @@ class MainWindow(QMainWindow):
         self._mic_rows: list[tuple] = []
         self._pvw_buttons: dict[int, QPushButton] = {}   # inputId → PVW button
         self._pgm_buttons: dict[int, QPushButton] = {}   # inputId → PGM button
+        self.extra_loop_inputs: list[int] = []           # loop cameras without a mic row
+        self._extra_chips: list[QPushButton] = []
 
         self._build_ui()
         self._refresh_devices()
@@ -985,14 +996,11 @@ class MainWindow(QMainWindow):
         cfg_outer.setContentsMargins(10, 10, 10, 10)
         cfg_outer.setSpacing(0)
 
-        # Two grid rows per setting: label+control, then a full-width description
-        # row underneath. (A shared description column overlaps at narrow widths
-        # because word-wrapped labels get under-sized by QGridLayout.)
-        cfg = QGridLayout()
-        cfg.setHorizontalSpacing(14)
-        cfg.setVerticalSpacing(2)
-        cfg.setColumnMinimumWidth(1, 170)
-        cfg.setColumnStretch(2, 1)
+        # A vertical stack: label+control row, then a full-width description
+        # under each setting. (A QVBoxLayout sizes word-wrapped labels reliably;
+        # QGridLayout under-sizes them so the texts overlap or clip.)
+        cfg = QVBoxLayout()
+        cfg.setSpacing(2)
 
         def _desc(text):
             lbl = QLabel(text)
@@ -1000,18 +1008,26 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             return lbl
 
-        # Row 0 — M/E
-        cfg.addWidget(QLabel("M/E for auto-switching:"), 0, 0)
+        def _setting(label_text, control, desc_text):
+            row = QHBoxLayout()
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(150)
+            row.addWidget(lbl)
+            row.addWidget(control)
+            row.addStretch()
+            cfg.addLayout(row)
+            cfg.addWidget(_desc(desc_text))
+
+        # M/E
         self.me_spin = QSpinBox()
         self.me_spin.setRange(1, 4)
         self.me_spin.setValue(1)
         self.me_spin.setFixedWidth(55)
         self.me_spin.valueChanged.connect(lambda _v: self._refresh_bus_highlights())
-        cfg.addWidget(self.me_spin, 0, 1)
-        cfg.addWidget(_desc("Which M/E bus the switcher controls. M/E 1 is the main program output. Most setups only have one M/E."), 1, 0, 1, 3)
+        _setting("M/E for auto-switching:", self.me_spin,
+                 "Which M/E bus the switcher controls. M/E 1 is the main program output. Most setups only have one M/E.")
 
-        # Row 1 — No-audio camera
-        cfg.addWidget(QLabel("No-audio camera:"), 2, 0)
+        # No-audio camera
         self.silence_combo = QComboBox()
         self.silence_combo.setMinimumWidth(160)
         for i in range(1, 21):
@@ -1039,33 +1055,49 @@ class MainWindow(QMainWindow):
         self.silence_loop_spin.setFixedWidth(60)
         sil_row.addWidget(self.silence_loop_spin)
         sil_row.addStretch()
-        cfg.addWidget(sil_w, 2, 1)
-        cfg.addWidget(_desc("Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps cycling through this camera and every row with its Loop box ticked, at the chosen interval, until audio returns."), 3, 0, 1, 3)
+        _setting("No-audio camera:", sil_w,
+                 "Camera to cut to when all microphones are silent and the silence delay has expired. With Loop enabled, the switcher then keeps cycling through this camera and every row with its Loop box ticked, at the chosen interval, until audio returns. The loop starts at a random camera each time.")
 
-        # Row 2 — Holdoff
-        cfg.addWidget(QLabel("Switch holdoff (s):"), 4, 0)
+        # Extra loop cameras (no mic row)
+        extra_w = QWidget()
+        extra_row = QHBoxLayout(extra_w)
+        extra_row.setContentsMargins(0, 0, 0, 0)
+        extra_row.setSpacing(6)
+        self.extra_loop_combo = QComboBox()
+        self.extra_loop_combo.setMinimumWidth(130)
+        for i in range(1, 21):
+            self.extra_loop_combo.addItem(str(i), i)
+        extra_row.addWidget(self.extra_loop_combo)
+        extra_add_btn = QPushButton("+ Add")
+        extra_add_btn.setFixedWidth(60)
+        extra_add_btn.clicked.connect(self._add_extra_loop_cam)
+        extra_row.addWidget(extra_add_btn)
+        self._extra_chips_row = extra_row
+        extra_row.addStretch()
+        _setting("Extra loop cameras:", extra_w,
+                 "Cameras without a microphone row (e.g. wide or beauty shots) to include in the silence loop. Click an added camera to remove it again.")
+
+        # Holdoff
         self.holdoff_spin = QDoubleSpinBox()
         self.holdoff_spin.setRange(0.0, 5.0)
         self.holdoff_spin.setValue(0.8)
         self.holdoff_spin.setSingleStep(0.1)
         self.holdoff_spin.setDecimals(1)
         self.holdoff_spin.setFixedWidth(55)
-        cfg.addWidget(self.holdoff_spin, 4, 1)
-        cfg.addWidget(_desc("Minimum time between two camera switches. Prevents rapid cutting when multiple mics open at the same time. 0.5–1.0 s is a good starting point."), 5, 0, 1, 3)
+        _setting("Switch holdoff (s):", self.holdoff_spin,
+                 "Minimum time between two camera switches. Prevents rapid cutting when multiple mics open at the same time. 0.5–1.0 s is a good starting point.")
 
-        # Row 3 — Silence delay
-        cfg.addWidget(QLabel("Silence delay (s):"), 6, 0)
+        # Silence delay
         self.silence_delay_spin = QDoubleSpinBox()
         self.silence_delay_spin.setRange(0.0, 15.0)
         self.silence_delay_spin.setValue(2.0)
         self.silence_delay_spin.setSingleStep(0.5)
         self.silence_delay_spin.setDecimals(1)
         self.silence_delay_spin.setFixedWidth(55)
-        cfg.addWidget(self.silence_delay_spin, 6, 1)
-        cfg.addWidget(_desc("How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away."), 7, 0, 1, 3)
+        _setting("Silence delay (s):", self.silence_delay_spin,
+                 "How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away.")
 
-        # Row 4 — PVW automation link
-        cfg.addWidget(QLabel("PVW automation camera:"), 8, 0)
+        # PVW automation link
         link_w = QWidget()
         link_row = QHBoxLayout(link_w)
         link_row.setContentsMargins(0, 0, 0, 0)
@@ -1079,8 +1111,8 @@ class MainWindow(QMainWindow):
             self.pvw_link_combo.addItem(str(i), i)
         link_row.addWidget(self.pvw_link_combo)
         link_row.addStretch()
-        cfg.addWidget(link_w, 8, 1)
-        cfg.addWidget(_desc("When checked: putting this camera on preview (PVW) turns automation ON; putting any other camera on preview turns automation OFF. Works from the PVW buttons below and from the ATEM panel itself."), 9, 0, 1, 3)
+        _setting("PVW automation camera:", link_w,
+                 "When checked: putting this camera on preview (PVW) turns automation ON; putting any other camera on preview turns automation OFF. Works from the PVW buttons below and from the ATEM panel itself.")
 
         cfg_outer.addLayout(cfg)
 
@@ -1286,6 +1318,8 @@ class MainWindow(QMainWindow):
             self.silence_delay_spin.setValue(s.get('silence_delay', 2.0))
             self.silence_loop_check.setChecked(s.get('silence_loop', False))
             self.silence_loop_spin.setValue(s.get('silence_loop_interval', 5.0))
+            self.extra_loop_inputs = [int(x) for x in s.get('extra_loop_inputs', [])]
+            self._rebuild_extra_chips()
             sil = s.get('silence_input', DEFAULT_SILENCE_INPUT)
             idx = self.silence_combo.findData(sil)
             if idx >= 0:
@@ -1348,6 +1382,7 @@ class MainWindow(QMainWindow):
             'silence_delay':     self.silence_delay_spin.value(),
             'silence_loop':          self.silence_loop_check.isChecked(),
             'silence_loop_interval': self.silence_loop_spin.value(),
+            'extra_loop_inputs':     self.extra_loop_inputs,
             'rows':              rows,
             'presets':           [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
             'companion_port':    self.companion_port_spin.value(),
@@ -1602,6 +1637,7 @@ class MainWindow(QMainWindow):
         combos = [inp_combo for _, ne, dc, cs, gs, ats, rs, inp_combo, bar in self._mic_rows]
         combos.append(self.silence_combo)
         combos.append(self.pvw_link_combo)
+        combos.append(self.extra_loop_combo)
         for combo in combos:
             current = combo.currentData()
             combo.blockSignals(True)
@@ -1651,6 +1687,38 @@ class MainWindow(QMainWindow):
 
         # Restore highlights from the last known bus state
         self._refresh_bus_highlights()
+
+    def _add_extra_loop_cam(self):
+        inp = self.extra_loop_combo.currentData()
+        if inp and inp not in self.extra_loop_inputs:
+            self.extra_loop_inputs.append(inp)
+            self._rebuild_extra_chips()
+
+    def _remove_extra_loop_cam(self, inp: int):
+        if inp in self.extra_loop_inputs:
+            self.extra_loop_inputs.remove(inp)
+            self._rebuild_extra_chips()
+
+    def _rebuild_extra_chips(self):
+        """Show the extra loop cameras as removable chips next to the Add button."""
+        for chip in self._extra_chips:
+            self._extra_chips_row.removeWidget(chip)
+            chip.hide()
+            chip.setParent(None)
+            chip.deleteLater()
+        self._extra_chips.clear()
+        atem = self.engine.atem.atem
+        for inp in self.extra_loop_inputs:
+            label = str(inp)
+            if atem and inp in atem.inputs:
+                label = atem.inputs[inp].get('short_name') or atem.inputs[inp].get('name') or label
+            chip = QPushButton(f"{label}  ✕")
+            chip.setToolTip(f"Input {inp} — click to remove from the loop")
+            chip.setFixedHeight(22)
+            chip.setStyleSheet(CHIP_STYLE)
+            chip.clicked.connect(lambda checked, i=inp: self._remove_extra_loop_cam(i))
+            self._extra_chips_row.insertWidget(self._extra_chips_row.count() - 1, chip)
+            self._extra_chips.append(chip)
 
     def _refresh_bus_highlights(self):
         """Re-apply PGM/PVW highlights from the ATEM state for the current M/E."""
@@ -1743,6 +1811,7 @@ class MainWindow(QMainWindow):
         self.test_me_spin.setRange(1, me_count)
         self._update_input_combos()
         self._rebuild_bus_buttons()
+        self._rebuild_extra_chips()   # pick up real input names
 
     def _toggle_audio(self):
         if self.engine.running:
@@ -1818,6 +1887,7 @@ class MainWindow(QMainWindow):
         e.silence_delay    = self.silence_delay_spin.value()
         e.silence_loop_enabled  = self.silence_loop_check.isChecked()
         e.silence_loop_interval = self.silence_loop_spin.value()
+        e.extra_loop_inputs     = list(self.extra_loop_inputs)
         e.me_index         = self.me_spin.value() - 1  # 0-based
 
     def _apply_preset(self, attack: float, release: float, holdoff: float):
@@ -1942,6 +2012,13 @@ PVW_BTN_ON = """
     QPushButton { background: #00cc55; color: #0a2a14; border: none;
                   border-radius: 4px; font-weight: bold; }
     QPushButton:hover { background: #00b84d; }
+"""
+
+# Extra loop camera chips
+CHIP_STYLE = """
+    QPushButton { background: #2a2a2a; color: #b8b8b8; border: 1px solid #484848;
+                  border-radius: 10px; padding: 0 8px; font-size: 11px; }
+    QPushButton:hover { border-color: #ff5555; color: #ff8888; }
 """
 
 # Automation button
