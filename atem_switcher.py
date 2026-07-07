@@ -966,15 +966,18 @@ class MainWindow(QMainWindow):
         cfg_outer.setContentsMargins(10, 10, 10, 10)
         cfg_outer.setSpacing(0)
 
+        # Two grid rows per setting: label+control, then a full-width description
+        # row underneath. (A shared description column overlaps at narrow widths
+        # because word-wrapped labels get under-sized by QGridLayout.)
         cfg = QGridLayout()
         cfg.setHorizontalSpacing(14)
-        cfg.setVerticalSpacing(0)
+        cfg.setVerticalSpacing(2)
         cfg.setColumnMinimumWidth(1, 170)
         cfg.setColumnStretch(2, 1)
 
         def _desc(text):
             lbl = QLabel(text)
-            lbl.setStyleSheet("color: #777; font-size: 11px;")
+            lbl.setStyleSheet("color: #777; font-size: 11px; padding-bottom: 10px;")
             lbl.setWordWrap(True)
             return lbl
 
@@ -986,10 +989,10 @@ class MainWindow(QMainWindow):
         self.me_spin.setFixedWidth(55)
         self.me_spin.valueChanged.connect(lambda _v: self._refresh_bus_highlights())
         cfg.addWidget(self.me_spin, 0, 1)
-        cfg.addWidget(_desc("Which M/E bus the switcher controls. M/E 1 is the main program output. Most setups only have one M/E."), 0, 2)
+        cfg.addWidget(_desc("Which M/E bus the switcher controls. M/E 1 is the main program output. Most setups only have one M/E."), 1, 0, 1, 3)
 
         # Row 1 — No-audio camera
-        cfg.addWidget(QLabel("No-audio camera:"), 1, 0)
+        cfg.addWidget(QLabel("No-audio camera:"), 2, 0)
         self.silence_combo = QComboBox()
         self.silence_combo.setMinimumWidth(160)
         for i in range(1, 21):
@@ -997,33 +1000,33 @@ class MainWindow(QMainWindow):
         idx = self.silence_combo.findData(DEFAULT_SILENCE_INPUT)
         if idx >= 0:
             self.silence_combo.setCurrentIndex(idx)
-        cfg.addWidget(self.silence_combo, 1, 1)
-        cfg.addWidget(_desc("Camera to cut to when all microphones are silent and the silence delay has expired. Typically a wide shot or presenter cam."), 1, 2)
+        cfg.addWidget(self.silence_combo, 2, 1)
+        cfg.addWidget(_desc("Camera to cut to when all microphones are silent and the silence delay has expired. Typically a wide shot or presenter cam."), 3, 0, 1, 3)
 
         # Row 2 — Holdoff
-        cfg.addWidget(QLabel("Switch holdoff (s):"), 2, 0)
+        cfg.addWidget(QLabel("Switch holdoff (s):"), 4, 0)
         self.holdoff_spin = QDoubleSpinBox()
         self.holdoff_spin.setRange(0.0, 5.0)
         self.holdoff_spin.setValue(0.8)
         self.holdoff_spin.setSingleStep(0.1)
         self.holdoff_spin.setDecimals(1)
         self.holdoff_spin.setFixedWidth(55)
-        cfg.addWidget(self.holdoff_spin, 2, 1)
-        cfg.addWidget(_desc("Minimum time between two camera switches. Prevents rapid cutting when multiple mics open at the same time. 0.5–1.0 s is a good starting point."), 2, 2)
+        cfg.addWidget(self.holdoff_spin, 4, 1)
+        cfg.addWidget(_desc("Minimum time between two camera switches. Prevents rapid cutting when multiple mics open at the same time. 0.5–1.0 s is a good starting point."), 5, 0, 1, 3)
 
         # Row 3 — Silence delay
-        cfg.addWidget(QLabel("Silence delay (s):"), 3, 0)
+        cfg.addWidget(QLabel("Silence delay (s):"), 6, 0)
         self.silence_delay_spin = QDoubleSpinBox()
         self.silence_delay_spin.setRange(0.0, 15.0)
         self.silence_delay_spin.setValue(2.0)
         self.silence_delay_spin.setSingleStep(0.5)
         self.silence_delay_spin.setDecimals(1)
         self.silence_delay_spin.setFixedWidth(55)
-        cfg.addWidget(self.silence_delay_spin, 3, 1)
-        cfg.addWidget(_desc("How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away."), 3, 2)
+        cfg.addWidget(self.silence_delay_spin, 6, 1)
+        cfg.addWidget(_desc("How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away."), 7, 0, 1, 3)
 
         # Row 4 — PVW automation link
-        cfg.addWidget(QLabel("PVW automation camera:"), 4, 0)
+        cfg.addWidget(QLabel("PVW automation camera:"), 8, 0)
         link_w = QWidget()
         link_row = QHBoxLayout(link_w)
         link_row.setContentsMargins(0, 0, 0, 0)
@@ -1037,8 +1040,8 @@ class MainWindow(QMainWindow):
             self.pvw_link_combo.addItem(str(i), i)
         link_row.addWidget(self.pvw_link_combo)
         link_row.addStretch()
-        cfg.addWidget(link_w, 4, 1)
-        cfg.addWidget(_desc("When checked: putting this camera on preview (PVW) turns automation ON; putting any other camera on preview turns automation OFF. Works from the PVW buttons below and from the ATEM panel itself."), 4, 2)
+        cfg.addWidget(link_w, 8, 1)
+        cfg.addWidget(_desc("When checked: putting this camera on preview (PVW) turns automation ON; putting any other camera on preview turns automation OFF. Works from the PVW buttons below and from the ATEM panel itself."), 9, 0, 1, 3)
 
         cfg_outer.addLayout(cfg)
 
