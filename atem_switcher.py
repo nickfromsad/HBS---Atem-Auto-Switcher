@@ -66,7 +66,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QGroupBox, QProgressBar, QGridLayout, QSizePolicy,
-    QTabWidget, QPlainTextEdit, QCheckBox,
+    QTabWidget, QPlainTextEdit, QCheckBox, QScrollArea, QFrame,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl
 from PyQt6.QtGui import QFont, QColor, QPalette, QDesktopServices
@@ -1185,24 +1185,44 @@ class MainWindow(QMainWindow):
         self._bus_content = QWidget()
         bus_outer.addWidget(self._bus_content)
         self.bus_box.toggled.connect(self._bus_content.setVisible)
-        bus_v = QVBoxLayout(self._bus_content)
-        bus_v.setContentsMargins(0, 0, 0, 0)
-        bus_v.setSpacing(6)
+        bus_h = QHBoxLayout(self._bus_content)
+        bus_h.setContentsMargins(0, 0, 0, 0)
+        bus_h.setSpacing(6)
 
-        self._pgm_grid = QGridLayout()
-        self._pvw_grid = QGridLayout()
-        for grid, tag, color in ((self._pgm_grid, "PGM", "#ff5555"),
-                                 (self._pvw_grid, "PVW", "#00cc55")):
-            grid.setSpacing(6)
-            for c in range(self._BUS_PER_ROW):
-                grid.setColumnStretch(c, 1)
-            row = QHBoxLayout()
+        # Fixed PGM/PVW labels on the left — the button rows scroll horizontally,
+        # so the panel height stays constant no matter how many inputs the ATEM has
+        labels_v = QVBoxLayout()
+        labels_v.setSpacing(6)
+        for tag, color in (("PGM", "#ff5555"), ("PVW", "#00cc55")):
             lbl = QLabel(tag)
-            lbl.setFixedWidth(36)
+            lbl.setFixedSize(36, self._BUS_BTN_H)
             lbl.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 12px;")
-            row.addWidget(lbl)
-            row.addLayout(grid, 1)
-            bus_v.addLayout(row)
+            labels_v.addWidget(lbl)
+        labels_v.addStretch()
+        bus_h.addLayout(labels_v)
+
+        self._pgm_row = QHBoxLayout()
+        self._pvw_row = QHBoxLayout()
+        rows_w = QWidget()
+        rows_v = QVBoxLayout(rows_w)
+        rows_v.setContentsMargins(0, 0, 0, 0)
+        rows_v.setSpacing(6)
+        for row in (self._pgm_row, self._pvw_row):
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            row.addStretch()
+            rows_v.addLayout(row)
+        rows_v.addStretch()
+
+        bus_scroll = QScrollArea()
+        bus_scroll.setWidgetResizable(True)
+        bus_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        bus_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        bus_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        bus_scroll.setWidget(rows_w)
+        # 2 button rows + spacing + room for the scrollbar
+        bus_scroll.setFixedHeight(self._BUS_BTN_H * 2 + 6 + 12)
+        bus_h.addWidget(bus_scroll, 1)
 
         layout.addWidget(self.bus_box)
         self._rebuild_bus_buttons()
@@ -1541,7 +1561,8 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
 
-    _BUS_PER_ROW = 10   # bus buttons per row before wrapping to the next line
+    _BUS_BTN_W = 54   # fixed bus button size — rows scroll horizontally instead
+    _BUS_BTN_H = 26   # of wrapping, so the panel height never grows
 
     def _rebuild_bus_buttons(self):
         """(Re)create the PGM and PVW button rows — from ATEM inputs when connected."""
@@ -1557,26 +1578,23 @@ class MainWindow(QMainWindow):
         else:
             entries = [(i, {'short_name': str(i), 'name': f'Input {i}'}) for i in range(1, 9)]
 
-        for grid, buttons, handler, style in (
-            (self._pgm_grid, self._pgm_buttons, self._pgm_clicked, PGM_BTN_OFF),
-            (self._pvw_grid, self._pvw_buttons, self._pvw_clicked, PVW_BTN_OFF),
+        for row, buttons, handler, style in (
+            (self._pgm_row, self._pgm_buttons, self._pgm_clicked, PGM_BTN_OFF),
+            (self._pvw_row, self._pvw_buttons, self._pvw_clicked, PVW_BTN_OFF),
         ):
             for btn in buttons.values():
-                grid.removeWidget(btn)
+                row.removeWidget(btn)
                 btn.hide()             # deleteLater is deferred — hide now so the
                 btn.setParent(None)    # old buttons can't paint over the new ones
                 btn.deleteLater()
             buttons.clear()
-            for i, (inp_id, info) in enumerate(entries):
+            for inp_id, info in entries:
                 btn = QPushButton(info.get('short_name') or str(inp_id))
                 btn.setToolTip(info.get('name') or f"Input {inp_id}")
-                btn.setMinimumHeight(26)
-                btn.setMaximumHeight(26)
-                btn.setMinimumWidth(24)   # allow shrinking — buttons share width equally
-                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                btn.setFixedSize(self._BUS_BTN_W, self._BUS_BTN_H)
                 btn.setStyleSheet(style)
                 btn.clicked.connect(lambda checked, i2=inp_id, h=handler: h(i2))
-                grid.addWidget(btn, i // self._BUS_PER_ROW, i % self._BUS_PER_ROW)
+                row.insertWidget(row.count() - 1, btn)   # keep trailing stretch last
                 buttons[inp_id] = btn
 
         # Restore highlights from the last known bus state
@@ -1974,6 +1992,11 @@ APP_STYLESHEET = """
     }
     QScrollBar::handle:vertical { background: #484848; border-radius: 4px; }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    QScrollBar:horizontal {
+        background: #1e1e1e; height: 8px; border: none;
+    }
+    QScrollBar::handle:horizontal { background: #484848; border-radius: 4px; min-width: 24px; }
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 """
 
 
