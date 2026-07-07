@@ -1166,8 +1166,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(bottom_tabs)
 
         # ── Program / Preview bus rows ────────────────────────────────────────
-        bus_box = QGroupBox("Program / Preview Bus")
-        bus_v = QVBoxLayout(bus_box)
+        self.bus_box = QGroupBox("Program / Preview Bus  (click to show/hide)")
+        self.bus_box.setCheckable(True)
+        self.bus_box.setChecked(True)
+        bus_outer = QVBoxLayout(self.bus_box)
+        bus_outer.setContentsMargins(8, 4, 8, 8)
+        self._bus_content = QWidget()
+        bus_outer.addWidget(self._bus_content)
+        self.bus_box.toggled.connect(self._bus_content.setVisible)
+        bus_v = QVBoxLayout(self._bus_content)
+        bus_v.setContentsMargins(0, 0, 0, 0)
         bus_v.setSpacing(6)
 
         self._pgm_grid = QGridLayout()
@@ -1185,7 +1193,7 @@ class MainWindow(QMainWindow):
             row.addLayout(grid, 1)
             bus_v.addLayout(row)
 
-        layout.addWidget(bus_box)
+        layout.addWidget(self.bus_box)
         self._rebuild_bus_buttons()
 
         # ── Automation toggle ─────────────────────────────────────────────────
@@ -1216,6 +1224,9 @@ class MainWindow(QMainWindow):
                     self._preset_spins[i][0].setValue(a)
                     self._preset_spins[i][1].setValue(r)
                     self._preset_spins[i][2].setValue(h)
+            if not s.get('bus_panel_open', True):
+                self.bus_box.setChecked(False)
+                self._bus_content.setVisible(False)
             self.pvw_link_check.setChecked(s.get('pvw_link_enabled', False))
             pvw_inp = s.get('pvw_link_input', 1)
             idx = self.pvw_link_combo.findData(pvw_inp)
@@ -1265,6 +1276,7 @@ class MainWindow(QMainWindow):
             'companion_enabled': self.companion_enable_btn.isChecked(),
             'pvw_link_enabled':  self.pvw_link_check.isChecked(),
             'pvw_link_input':    self.pvw_link_combo.currentData() or 1,
+            'bus_panel_open':    self.bus_box.isChecked(),
         }
         try:
             with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -1499,16 +1511,18 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
 
-    _BUS_PER_ROW = 8   # bus buttons per row before wrapping to the next line
+    _BUS_PER_ROW = 10   # bus buttons per row before wrapping to the next line
 
     def _rebuild_bus_buttons(self):
         """(Re)create the PGM and PVW button rows — from ATEM inputs when connected."""
         atem = self.engine.atem.atem
         if atem and atem.inputs:
+            # Cameras only (external inputs) — media players etc. stay available
+            # in the dropdowns but would make the bus rows too tall
             entries = [
                 (inp_id, info)
                 for inp_id, info in sorted(atem.inputs.items())
-                if info.get('type', 0) in self._SHOW_PORT_TYPES
+                if info.get('type', 0) == 0
             ]
         else:
             entries = [(i, {'short_name': str(i), 'name': f'Input {i}'}) for i in range(1, 9)]
@@ -1526,7 +1540,8 @@ class MainWindow(QMainWindow):
             for i, (inp_id, info) in enumerate(entries):
                 btn = QPushButton(info.get('short_name') or str(inp_id))
                 btn.setToolTip(info.get('name') or f"Input {inp_id}")
-                btn.setMinimumHeight(34)
+                btn.setMinimumHeight(26)
+                btn.setMaximumHeight(26)
                 btn.setMinimumWidth(24)   # allow shrinking — buttons share width equally
                 btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 btn.setStyleSheet(style)
