@@ -59,7 +59,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QGroupBox, QProgressBar, QGridLayout, QSizePolicy,
-    QTabWidget, QPlainTextEdit,
+    QTabWidget, QPlainTextEdit, QCheckBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QUrl
 from PyQt6.QtGui import QFont, QColor, QPalette, QDesktopServices
@@ -93,14 +93,25 @@ class ATEMConnection:
         self.model_name: str = ""
         self.me_count:   int = 1
         self.inputs: dict[int, dict] = {}   # inputId → {name, short_name}
+        self.preview: dict[int, int] = {}   # me_idx → current preview source
+        self.program: dict[int, int] = {}   # me_idx → current program source
         # Called (from keepalive thread) when connection drops — set by ATEMController
         self.on_disconnect = None
+        # Called with (me_idx, source) whenever the preview/program bus changes
+        self.on_preview = None
+        self.on_program = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def connect(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(8.0)
+        # Large receive buffer — the state dump arrives as a fast burst of
+        # hundreds of packets; the OS default buffer can overflow and drop some.
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+        except OSError:
+            pass
 
         # SYN / hello — must match sofie's COMMAND_CONNECT_HELLO exactly:
         # 10 14 53 ab 00 00 00 00 00 3a 00 00 01 00 00 00 00 00 00 00
@@ -134,12 +145,20 @@ class ATEMConnection:
                 if pkt_sess:
                     self._session = pkt_sess
                 rid = struct.unpack('!H', data[10:12])[0]
+                in_order = True
                 if rid:
-                    if rid > self._last_rid:
+                    # Cumulative ACK: only advance on the next in-order packet id.
+                    # On a gap (lost packet) keep acking the last in-order id so
+                    # the ATEM retransmits the missing packets — otherwise InCm
+                    # can be lost forever and the dump never completes.
+                    in_order = ((rid - self._last_rid) & 0x7FFF) == 1
+                    if in_order:
                         self._last_rid = rid
                     ack_pkt = self._ack(s, self._last_rid)
                     s.sendto(ack_pkt, (self.ip, self.PORT))
                     n_acked += 1
+                if not in_order:
+                    continue   # duplicate or out-of-order — wait for retransmit
                 # Parse commands from this packet to learn model/topology
                 self._parse_state_packet(data)
                 if b'InCm' in data:
@@ -160,6 +179,13 @@ class ATEMConnection:
 
     def switch_program(self, inp: int, me: int = 0) -> bool:
         """Send CPgI (Change Program Input) command. me is 0-indexed."""
+        return self._send_bus_command(b'CPgI', inp, me)
+
+    def switch_preview(self, inp: int, me: int = 0) -> bool:
+        """Send CPvI (Change Preview Input) command. me is 0-indexed."""
+        return self._send_bus_command(b'CPvI', inp, me)
+
+    def _send_bus_command(self, cmd: bytes, inp: int, me: int) -> bool:
         with self._lock:
             s = self._sock
             if s is None:
@@ -167,12 +193,12 @@ class ATEMConnection:
             try:
                 self._pkt_id = (self._pkt_id + 1) & 0x7FFF
                 cmd_data = struct.pack('!BxH', me, inp)          # ME (0-indexed), pad, source
-                cmd_env  = struct.pack('!H2s4s', 12, b'\x00\x00', b'CPgI') + cmd_data
+                cmd_env  = struct.pack('!H2s4s', 12, b'\x00\x00', cmd) + cmd_data
                 # sofie leaves ack_id=0 in command packets (bytes 4-5 not written)
                 pkt      = self._build(0x01, cmd_env,
                                        local_id=self._pkt_id,
                                        ack_id=0)
-                print(f"ATEM ▶ CPgI ME{me+1} input={inp}  pkt_id={self._pkt_id}  hex={pkt.hex()}")
+                print(f"ATEM ▶ {cmd.decode()} ME{me+1} input={inp}  pkt_id={self._pkt_id}  hex={pkt.hex()}")
                 s.sendto(pkt, (self.ip, self.PORT))
                 return True
             except Exception as e:
@@ -217,30 +243,24 @@ class ATEMConnection:
                     self._drop_connection(s)
                     break
 
-                # Log PrgI updates (ATEM confirming a program switch)
-                if b'PrgI' in data:
-                    offset = 12
-                    while offset + 8 <= len(data):
-                        clen = struct.unpack('!H', data[offset:offset + 2])[0]
-                        if clen < 8 or offset + clen > len(data):
-                            break
-                        if data[offset + 4:offset + 8] == b'PrgI' and clen >= 12:
-                            p = data[offset + 8:offset + clen]
-                            me_idx = p[0]
-                            src    = struct.unpack('!H', p[2:4])[0]
-                            print(f"ATEM PrgI ME{me_idx+1}=source {src}")
-                        offset += clen
-
+                in_order = True
                 if (flags & 0x01) and rid:          # RELIABLE → ACK it
                     with self._lock:
-                        if rid > self._last_rid:      # only advance, never go backwards
+                        # Only advance on the next in-order id (wrap-aware).
+                        # On a gap, re-ack the last in-order id so the ATEM
+                        # retransmits the lost packet.
+                        in_order = ((rid - self._last_rid) & 0x7FFF) == 1
+                        if in_order:
                             self._last_rid = rid
-                        ack_rid = self._last_rid      # always ACK the highest seen
                         if self._sock:
                             try:
-                                self._sock.sendto(self._ack(s, ack_rid), (self.ip, self.PORT))
+                                self._sock.sendto(self._ack(s, self._last_rid), (self.ip, self.PORT))
                             except Exception:
                                 pass
+
+                if in_order:
+                    # Parse state updates (PrgI/PrvI/InPr…) — fires on_preview callback
+                    self._parse_state_packet(data)
             except (socket.timeout, TimeoutError):
                 no_data_ticks += 1
                 if no_data_ticks >= 20:   # 10 s of silence → connection lost
@@ -300,7 +320,21 @@ class ATEMConnection:
             elif name == b'PrgI' and len(payload) >= 4:
                 me_idx = payload[0]
                 src    = struct.unpack('!H', payload[2:4])[0]
-                print(f"  PrgI ME{me_idx+1}=source {src}")
+                if self.program.get(me_idx) != src:
+                    self.program[me_idx] = src
+                    print(f"  PrgI ME{me_idx+1}=source {src}")
+                    cb = self.on_program
+                    if cb:
+                        cb(me_idx, src)
+            elif name == b'PrvI' and len(payload) >= 4:
+                me_idx = payload[0]
+                src    = struct.unpack('!H', payload[2:4])[0]
+                if self.preview.get(me_idx) != src:
+                    self.preview[me_idx] = src
+                    print(f"  PrvI ME{me_idx+1}=source {src}")
+                    cb = self.on_preview
+                    if cb:
+                        cb(me_idx, src)
             offset += length
 
     def _build(self, flags: int, payload: bytes = b'', local_id: int = 0,
@@ -343,6 +377,8 @@ class Signals(QObject):
     atem_disconnected  = pyqtSignal()
     atem_connected     = pyqtSignal()
     automation_changed = pyqtSignal(bool)   # Companion HTTP triggered a toggle
+    preview_changed    = pyqtSignal(int, int)  # (me_idx, source) — ATEM preview bus changed
+    program_changed    = pyqtSignal(int, int)  # (me_idx, source) — ATEM program bus changed
     log_line           = pyqtSignal(str)    # new log line for the GUI log tab
 
 
@@ -350,7 +386,8 @@ class Signals(QObject):
 
 class ATEMController:
 
-    def __init__(self, on_disconnect=None, on_connect=None):
+    def __init__(self, on_disconnect=None, on_connect=None, on_preview=None,
+                 on_program=None):
         self.atem: ATEMConnection | None = None
         self.connected = False
         self._ip = ""
@@ -358,6 +395,8 @@ class ATEMController:
         self._last_disconnect = -9999.0
         self._on_disconnect_cb = on_disconnect   # called on connection drop (from any thread)
         self._on_connect_cb    = on_connect      # called on successful connect/reconnect
+        self._on_preview_cb    = on_preview      # called with (me_idx, src) on preview change
+        self._on_program_cb    = on_program      # called with (me_idx, src) on program change
 
     def connect(self, ip: str) -> bool:
         self._ip = ip
@@ -366,6 +405,8 @@ class ATEMController:
                 self._silent_disconnect()
             self.atem = ATEMConnection(ip)
             self.atem.on_disconnect = self._handle_drop
+            self.atem.on_preview    = self._on_preview_cb
+            self.atem.on_program    = self._on_program_cb
             self.atem.connect()
             self.connected = True
             if self._on_connect_cb:
@@ -414,6 +455,11 @@ class ATEMController:
             return False
         return self.atem.switch_program(input_number, me)
 
+    def switch_preview(self, input_number: int, me: int = 0) -> bool:
+        if not self.connected or self.atem is None:
+            return False
+        return self.atem.switch_preview(input_number, me)
+
 
 # ── Audio Engine ──────────────────────────────────────────────────────────────
 
@@ -423,6 +469,8 @@ class AudioEngine:
         self.atem = ATEMController(
             on_disconnect=self._on_atem_drop,
             on_connect=self._on_atem_connect,
+            on_preview=self._on_atem_preview,
+            on_program=self._on_atem_program,
         )
 
         self.running = False
@@ -456,6 +504,12 @@ class AudioEngine:
 
     def _on_atem_connect(self):
         self.signals.atem_connected.emit()
+
+    def _on_atem_preview(self, me_idx: int, src: int):
+        self.signals.preview_changed.emit(me_idx, src)
+
+    def _on_atem_program(self, me_idx: int, src: int):
+        self.signals.program_changed.emit(me_idx, src)
 
     def start_audio(self):
         self.stop_audio()
@@ -715,12 +769,16 @@ class MainWindow(QMainWindow):
         self.signals.atem_disconnected.connect(self._on_atem_disconnected)
         self.signals.atem_connected.connect(self._on_atem_connected)
         self.signals.automation_changed.connect(self._on_automation_changed)
+        self.signals.preview_changed.connect(self._on_preview_changed)
+        self.signals.program_changed.connect(self._on_program_changed)
         self.signals.log_line.connect(self._on_log_line)
         sys.stdout._gui_cb = self.signals.log_line.emit
 
         self._input_devices: list[tuple[int, str]] = []   # (device_idx, label)
         # Each entry: (row_widget, device_combo, ch_spin, inp_spin, bar)
         self._mic_rows: list[tuple] = []
+        self._pvw_buttons: dict[int, QPushButton] = {}   # inputId → PVW button
+        self._pgm_buttons: dict[int, QPushButton] = {}   # inputId → PGM button
 
         self._build_ui()
         self._refresh_devices()
@@ -930,6 +988,24 @@ class MainWindow(QMainWindow):
         cfg.addWidget(self.silence_delay_spin, 3, 1)
         cfg.addWidget(_desc("How long all mics must be silent before cutting to the no-audio camera. Gives speakers a natural pause without immediately switching away."), 3, 2)
 
+        # Row 4 — PVW automation link
+        cfg.addWidget(QLabel("PVW automation camera:"), 4, 0)
+        link_w = QWidget()
+        link_row = QHBoxLayout(link_w)
+        link_row.setContentsMargins(0, 0, 0, 0)
+        link_row.setSpacing(6)
+        self.pvw_link_check = QCheckBox()
+        self.pvw_link_check.setToolTip("Enable PVW-controlled automation")
+        link_row.addWidget(self.pvw_link_check)
+        self.pvw_link_combo = QComboBox()
+        self.pvw_link_combo.setMinimumWidth(130)
+        for i in range(1, 21):
+            self.pvw_link_combo.addItem(str(i), i)
+        link_row.addWidget(self.pvw_link_combo)
+        link_row.addStretch()
+        cfg.addWidget(link_w, 4, 1)
+        cfg.addWidget(_desc("When checked: putting this camera on preview (PVW) turns automation ON; putting any other camera on preview turns automation OFF. Works from the PVW buttons below and from the ATEM panel itself."), 4, 2)
+
         cfg_outer.addLayout(cfg)
 
         # ── Companion integration ──────────────────────────────────────────────
@@ -1063,6 +1139,29 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(bottom_tabs)
 
+        # ── Program / Preview bus rows ────────────────────────────────────────
+        bus_box = QGroupBox("Program / Preview Bus")
+        bus_v = QVBoxLayout(bus_box)
+        bus_v.setSpacing(6)
+
+        self._pgm_grid = QGridLayout()
+        self._pvw_grid = QGridLayout()
+        for grid, tag, color in ((self._pgm_grid, "PGM", "#ff5555"),
+                                 (self._pvw_grid, "PVW", "#00cc55")):
+            grid.setSpacing(6)
+            for c in range(self._BUS_PER_ROW):
+                grid.setColumnStretch(c, 1)
+            row = QHBoxLayout()
+            lbl = QLabel(tag)
+            lbl.setFixedWidth(36)
+            lbl.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 12px;")
+            row.addWidget(lbl)
+            row.addLayout(grid, 1)
+            bus_v.addLayout(row)
+
+        layout.addWidget(bus_box)
+        self._rebuild_bus_buttons()
+
         # ── Automation toggle ─────────────────────────────────────────────────
         self.auto_btn = QPushButton("AUTOMATION  OFF")
         self.auto_btn.setCheckable(True)
@@ -1091,6 +1190,11 @@ class MainWindow(QMainWindow):
                     self._preset_spins[i][0].setValue(a)
                     self._preset_spins[i][1].setValue(r)
                     self._preset_spins[i][2].setValue(h)
+            self.pvw_link_check.setChecked(s.get('pvw_link_enabled', False))
+            pvw_inp = s.get('pvw_link_input', 1)
+            idx = self.pvw_link_combo.findData(pvw_inp)
+            if idx >= 0:
+                self.pvw_link_combo.setCurrentIndex(idx)
             self.companion_port_spin.setValue(s.get('companion_port', 8765))
             if s.get('companion_enabled', False):
                 self.companion_enable_btn.setChecked(True)
@@ -1133,6 +1237,8 @@ class MainWindow(QMainWindow):
             'presets':           [(a.value(), r.value(), h.value()) for a, r, h in self._preset_spins],
             'companion_port':    self.companion_port_spin.value(),
             'companion_enabled': self.companion_enable_btn.isChecked(),
+            'pvw_link_enabled':  self.pvw_link_check.isChecked(),
+            'pvw_link_input':    self.pvw_link_combo.currentData() or 1,
         }
         try:
             with open(_SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -1355,6 +1461,7 @@ class MainWindow(QMainWindow):
         ]
         combos = [inp_combo for _, ne, dc, cs, gs, ats, rs, inp_combo, bar in self._mic_rows]
         combos.append(self.silence_combo)
+        combos.append(self.pvw_link_combo)
         for combo in combos:
             current = combo.currentData()
             combo.blockSignals(True)
@@ -1365,6 +1472,81 @@ class MainWindow(QMainWindow):
             idx = combo.findData(current)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.blockSignals(False)
+
+    _BUS_PER_ROW = 8   # bus buttons per row before wrapping to the next line
+
+    def _rebuild_bus_buttons(self):
+        """(Re)create the PGM and PVW button rows — from ATEM inputs when connected."""
+        atem = self.engine.atem.atem
+        if atem and atem.inputs:
+            entries = [
+                (inp_id, info)
+                for inp_id, info in sorted(atem.inputs.items())
+                if info.get('type', 0) in self._SHOW_PORT_TYPES
+            ]
+        else:
+            entries = [(i, {'short_name': str(i), 'name': f'Input {i}'}) for i in range(1, 9)]
+
+        for grid, buttons, handler, style in (
+            (self._pgm_grid, self._pgm_buttons, self._pgm_clicked, PGM_BTN_OFF),
+            (self._pvw_grid, self._pvw_buttons, self._pvw_clicked, PVW_BTN_OFF),
+        ):
+            for btn in buttons.values():
+                grid.removeWidget(btn)
+                btn.hide()             # deleteLater is deferred — hide now so the
+                btn.setParent(None)    # old buttons can't paint over the new ones
+                btn.deleteLater()
+            buttons.clear()
+            for i, (inp_id, info) in enumerate(entries):
+                btn = QPushButton(info.get('short_name') or str(inp_id))
+                btn.setToolTip(info.get('name') or f"Input {inp_id}")
+                btn.setMinimumHeight(34)
+                btn.setMinimumWidth(24)   # allow shrinking — buttons share width equally
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                btn.setStyleSheet(style)
+                btn.clicked.connect(lambda checked, i2=inp_id, h=handler: h(i2))
+                grid.addWidget(btn, i // self._BUS_PER_ROW, i % self._BUS_PER_ROW)
+                buttons[inp_id] = btn
+
+        # Restore highlights from the last known bus state
+        if atem:
+            me = self.me_spin.value() - 1
+            src = atem.program.get(me)
+            if src is not None:
+                self._apply_program(src)
+            src = atem.preview.get(me)
+            if src is not None:
+                self._apply_preview(src)
+
+    def _pgm_clicked(self, inp: int):
+        me = self.me_spin.value() - 1
+        ok = self.engine.atem.switch_program(inp, me)
+        if not ok:
+            print(f"PGM select → input {inp} failed (ATEM not connected)")
+        # Highlight follows the PrgI confirmation from the ATEM
+
+    def _pvw_clicked(self, inp: int):
+        me = self.me_spin.value() - 1
+        ok = self.engine.atem.switch_preview(inp, me)
+        if not ok:
+            print(f"PVW select → input {inp} failed (ATEM not connected)")
+        # Highlight + automation follow the PrvI confirmation from the ATEM
+
+    def _apply_program(self, src: int):
+        """Highlight the active PGM button and the matching channel tally."""
+        for inp_id, btn in self._pgm_buttons.items():
+            btn.setStyleSheet(PGM_BTN_ON if inp_id == src else PGM_BTN_OFF)
+        for row_w, ne, dc, cs, gs, ats, rs, ins, bar in self._mic_rows:
+            active = ins.currentData() == src
+            row_w._indicator.setStyleSheet(TALLY_ACTIVE if active else TALLY_INACTIVE)
+
+    def _apply_preview(self, src: int):
+        """Highlight the active PVW button and apply the automation link."""
+        for inp_id, btn in self._pvw_buttons.items():
+            btn.setStyleSheet(PVW_BTN_ON if inp_id == src else PVW_BTN_OFF)
+        if self.pvw_link_check.isChecked():
+            want = self.pvw_link_combo.currentData()
+            self.auto_btn.setChecked(src == want)
 
     # ── Slots ─────────────────────────────────────────────────────────────────
 
@@ -1403,6 +1585,7 @@ class MainWindow(QMainWindow):
         self.me_spin.setRange(1, me_count)
         self.test_me_spin.setRange(1, me_count)
         self._update_input_combos()
+        self._rebuild_bus_buttons()
 
     def _toggle_audio(self):
         if self.engine.running:
@@ -1427,6 +1610,16 @@ class MainWindow(QMainWindow):
     def _on_automation_changed(self, on: bool):
         """Slot — called when Companion HTTP request toggles automation."""
         self.auto_btn.setChecked(on)   # triggers _toggle_automation via toggled signal
+
+    def _on_preview_changed(self, me_idx: int, src: int):
+        """Slot — ATEM preview bus changed (from our PVW buttons or the panel)."""
+        if me_idx == self.me_spin.value() - 1:
+            self._apply_preview(src)
+
+    def _on_program_changed(self, me_idx: int, src: int):
+        """Slot — ATEM program bus changed (automation, PGM buttons or the panel)."""
+        if me_idx == self.me_spin.value() - 1:
+            self._apply_program(src)
 
     def _on_log_line(self, text: str):
         self._log_view.appendPlainText(text.rstrip())
@@ -1565,6 +1758,30 @@ GATE_LBL_CLOSED    = "color: #484848; background: transparent; font-size: 10px; 
 GATE_LBL_ATTACK    = "color: #aaa; background: #2e2e2e; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
 GATE_LBL_OPEN      = "color: #1e1e1e; background: #c8c8c8; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
 GATE_LBL_RELEASING = "color: #787878; background: #2a2a2a; border-radius: 2px; font-size: 10px; font-weight: bold; padding: 0 2px;"
+
+# PGM bus buttons — red like the ATEM program bus
+PGM_BTN_OFF = """
+    QPushButton { background: #252525; color: #c8c8c8; border: 1px solid #404040;
+                  border-radius: 4px; font-weight: bold; }
+    QPushButton:hover { border-color: #ff4444; background: #2e2e2e; }
+"""
+PGM_BTN_ON = """
+    QPushButton { background: #e03030; color: #2a0808; border: none;
+                  border-radius: 4px; font-weight: bold; }
+    QPushButton:hover { background: #c82828; }
+"""
+
+# PVW bus buttons — green like the ATEM preview bus
+PVW_BTN_OFF = """
+    QPushButton { background: #252525; color: #c8c8c8; border: 1px solid #404040;
+                  border-radius: 4px; font-weight: bold; }
+    QPushButton:hover { border-color: #00cc55; background: #2e2e2e; }
+"""
+PVW_BTN_ON = """
+    QPushButton { background: #00cc55; color: #0a2a14; border: none;
+                  border-radius: 4px; font-weight: bold; }
+    QPushButton:hover { background: #00b84d; }
+"""
 
 # Automation button
 BTN_STYLE_OFF = """
