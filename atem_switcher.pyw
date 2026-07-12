@@ -25,7 +25,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ── Tee stdout to atem_log.txt ────────────────────────────────────────────────
 class _Tee:
     def __init__(self, *streams):
-        self._streams = list(streams)
+        # windowed exe (pythonw/PyInstaller --windowed) has no console:
+        # sys.__stdout__/__stderr__ are None there, so drop them
+        self._streams = [f for f in streams if f is not None]
         self._gui_cb = None   # set to signals.log_line.emit after Qt starts
     def write(self, s):
         for f in self._streams:
@@ -54,6 +56,7 @@ except OSError:
 _log_file = open(_LOG_PATH, 'w', encoding='utf-8')
 _log_file.write(f'=== ATEM log started {datetime.datetime.now()} ===\n')
 sys.stdout = _Tee(sys.__stdout__, _log_file)
+sys.stderr = _Tee(sys.__stderr__, _log_file)
 
 # Write arrow SVGs used by the stylesheet
 _ARROW_UP_SVG  = _os.path.join(_APP_DIR, 'arrow_up.svg')
@@ -366,7 +369,7 @@ class ATEMConnection:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-APP_VERSION = "1.26"   # bump on every release (matches the GitHub commit count)
+APP_VERSION = "1.27"   # bump on every release (matches the GitHub commit count)
 
 AUDIO_SAMPLERATE    = 48000
 AUDIO_BLOCKSIZE     = 1024
