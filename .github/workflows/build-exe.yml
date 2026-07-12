@@ -1,0 +1,52 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyinstaller PyQt6 numpy sounddevice PyATEMMax
+
+      - name: Extract embedded icon
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import re, base64
+          src = open("atem_switcher.pyw", encoding="utf-8").read()
+          b64 = re.search(r'_ICON_B64 = "([^"]*)"', src).group(1)
+          open("icon.ico", "wb").write(base64.b64decode(b64))
+          EOF
+
+      - name: Build exe
+        run: pyinstaller --onefile --windowed --icon icon.ico --name "HBS-ATEM-Auto-Switcher" atem_switcher.pyw
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(python -c "import re; print(re.search(r'APP_VERSION = \"([^\"]+)\"', open('atem_switcher.pyw', encoding='utf-8').read()).group(1))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          EXE="dist/HBS-ATEM-Auto-Switcher.exe"
+          gh release create "$TAG" "$EXE" --title "$TAG" \
+            --notes "HBS ATEM Auto Switcher $TAG (Windows, standalone exe)" \
+            --repo "$GITHUB_REPOSITORY" \
+          || gh release upload "$TAG" "$EXE" --clobber --repo "$GITHUB_REPOSITORY"
