@@ -1,5 +1,10 @@
 atem_log.txt
 atem_settings.json
+*.ico
+*.exe
+*.spec
+dist/
+build/
 __pycache__/
 *.pyc
 .DS_Store

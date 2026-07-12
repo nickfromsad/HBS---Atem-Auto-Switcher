@@ -55,8 +55,10 @@ pip install PyQt6 sounddevice numpy
 3. Run the switcher:
 
 ```bash
-python atem_switcher.py
+python atem_switcher.pyw
 ```
+
+Or on Windows, download `HBS-ATEM-Auto-Switcher.exe` from the [latest release](https://github.com/nickfromsad/HBS---Atem-Auto-Switcher/releases/latest) and double-click it — no Python install needed.
 
 4. Enter the ATEM IP address and click **Connect**.
 5. For each channel row, select the DVS device, the audio channel (0 = left, 1 = right), set the gate threshold, and choose which ATEM camera input to switch to.
